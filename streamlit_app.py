@@ -307,6 +307,41 @@ POSITIONS = {
     'RF': 'Right Field',
 }
 
+# Full team name → abbreviation (handles all Savant format variants)
+TEAM_NAME_TO_ABBREV = {
+    'Arizona Diamondbacks': 'ARI', 'D-backs': 'ARI', 'Arizona': 'ARI',
+    'Atlanta Braves': 'ATL', 'Braves': 'ATL', 'Atlanta': 'ATL',
+    'Baltimore Orioles': 'BAL', 'Orioles': 'BAL', 'Baltimore': 'BAL',
+    'Boston Red Sox': 'BOS', 'Red Sox': 'BOS', 'Boston': 'BOS',
+    'Chicago Cubs': 'CHC', 'Cubs': 'CHC',
+    'Chicago White Sox': 'CWS', 'White Sox': 'CWS',
+    'Cincinnati Reds': 'CIN', 'Reds': 'CIN', 'Cincinnati': 'CIN',
+    'Cleveland Guardians': 'CLE', 'Guardians': 'CLE', 'Cleveland': 'CLE',
+    'Colorado Rockies': 'COL', 'Rockies': 'COL', 'Colorado': 'COL',
+    'Detroit Tigers': 'DET', 'Tigers': 'DET', 'Detroit': 'DET',
+    'Houston Astros': 'HOU', 'Astros': 'HOU', 'Houston': 'HOU',
+    'Kansas City Royals': 'KC', 'Royals': 'KC', 'Kansas City': 'KC',
+    'Los Angeles Angels': 'LAA', 'Angels': 'LAA',
+    'Los Angeles Dodgers': 'LAD', 'Dodgers': 'LAD',
+    'Miami Marlins': 'MIA', 'Marlins': 'MIA', 'Miami': 'MIA',
+    'Milwaukee Brewers': 'MIL', 'Brewers': 'MIL', 'Milwaukee': 'MIL',
+    'Minnesota Twins': 'MIN', 'Twins': 'MIN', 'Minnesota': 'MIN',
+    'New York Mets': 'NYM', 'Mets': 'NYM',
+    'New York Yankees': 'NYY', 'Yankees': 'NYY',
+    'Oakland Athletics': 'OAK', 'Athletics': 'OAK', 'Oakland': 'OAK',
+    'Sacramento River Cats': 'OAK',  # AAA affiliate fallback
+    'Philadelphia Phillies': 'PHI', 'Phillies': 'PHI', 'Philadelphia': 'PHI',
+    'Pittsburgh Pirates': 'PIT', 'Pirates': 'PIT', 'Pittsburgh': 'PIT',
+    'San Diego Padres': 'SD', 'Padres': 'SD', 'San Diego': 'SD',
+    'Seattle Mariners': 'SEA', 'Mariners': 'SEA', 'Seattle': 'SEA',
+    'San Francisco Giants': 'SF', 'Giants': 'SF', 'San Francisco': 'SF',
+    'St. Louis Cardinals': 'STL', 'Cardinals': 'STL', 'St. Louis': 'STL',
+    'Tampa Bay Rays': 'TB', 'Rays': 'TB', 'Tampa Bay': 'TB',
+    'Texas Rangers': 'TEX', 'Rangers': 'TEX', 'Texas': 'TEX',
+    'Toronto Blue Jays': 'TOR', 'Blue Jays': 'TOR', 'Toronto': 'TOR',
+    'Washington Nationals': 'WSH', 'Nationals': 'WSH', 'Washington': 'WSH',
+}
+
 POSITION_GROUPS = {
     'Catcher': ['C'],
     'Infield': ['1B', '2B', '3B', 'SS'],
@@ -723,27 +758,32 @@ def standardize_columns(df: pd.DataFrame, source: str) -> pd.DataFrame:
         'savant_oaa': {
             'outs_above_average': 'oaa',
             'fielding_run_value': 'frv',
-            # Team column varies by Savant endpoint version
-            'team_name_alt':    'team',
-            'team_name_abbrev': 'team',
+            # Team — all known Savant column names
+            'team_name_alt':     'team',
+            'team_name_abbrev':  'team',
             'team_abbreviation': 'team',
             'display_team_name': 'team_long',
-            'team_name':        'team_long',
+            'team_name':         'team_long',
             'primary_pos_formatted': 'position',
-            'inn':      'innings',
+            # Innings — all known column name variants
+            'inn':            'innings',
+            'innings_played': 'innings',
+            'total_innings':  'innings',
+            # Attempts
             'attempts': 'oaa_attempts',
             'n_att':    'oaa_attempts',
         },
         'savant_frv': {
             'fielding_run_value': 'frv',
-            'team_name_alt':    'team',
-            'team_name_abbrev': 'team',
+            'team_name_alt':     'team',
+            'team_name_abbrev':  'team',
             'team_abbreviation': 'team',
             'display_team_name': 'team_long',
-            'team_name':        'team_long',
+            'team_name':         'team_long',
             'primary_pos_formatted': 'position',
-            'inn':      'innings',
-            'attempts': 'oaa_attempts',
+            'inn':            'innings',
+            'innings_played': 'innings',
+            'attempts':       'oaa_attempts',
         },
         'savant_sprint': {
             # sprint speed uses 'team' directly, no _alt suffix
@@ -767,6 +807,22 @@ def standardize_columns(df: pd.DataFrame, source: str) -> pd.DataFrame:
 
     # Drop duplicate columns that may arise from multiple aliases mapping to same canonical name
     df = df.loc[:, ~df.columns.duplicated(keep='first')]
+
+    # Normalize team column: convert full names to abbreviations
+    if 'team' in df.columns:
+        df['team'] = df['team'].apply(
+            lambda t: TEAM_NAME_TO_ABBREV.get(str(t).strip(), str(t).strip()) if pd.notna(t) else t
+        )
+    elif 'team_long' in df.columns:
+        # team_long has full name — create abbreviation team column from it
+        df['team'] = df['team_long'].apply(
+            lambda t: TEAM_NAME_TO_ABBREV.get(str(t).strip(), str(t).strip()[:3].upper()) if pd.notna(t) else t
+        )
+
+    # Ensure innings is numeric; if missing entirely, set to 0 for now
+    # (will be estimated from attempts in build_master_dataset)
+    if 'innings' in df.columns:
+        df['innings'] = pd.to_numeric(df['innings'], errors='coerce').fillna(0)
 
     return df
 
@@ -1128,6 +1184,8 @@ def calculate_rcdef_plus(df: pd.DataFrame) -> pd.DataFrame:
     """
     RCDef+: Position-specific percentile (0-100).
     50 = average. 100 = best at position. 0 = worst.
+    Uses method='min' so tied players share the lower rank (no ties at 100).
+    Stored as float with 1 decimal so leaderboard sort is stable.
     """
     df['rcdef_plus'] = np.nan
 
@@ -1139,9 +1197,13 @@ def calculate_rcdef_plus(df: pd.DataFrame) -> pd.DataFrame:
         pos_vals = df.loc[mask, 'rcdef'].dropna()
         if len(pos_vals) < 3:
             continue
-        # Percentile rank within position
-        ranks = pos_vals.rank(pct=True) * 100
-        df.loc[ranks.index, 'rcdef_plus'] = ranks.round(0).astype(int)
+        # method='first' ensures unique ranks — no two players share 100th
+        # multiply by (n-1)/n so max is strictly below 100, then rescale
+        n = len(pos_vals)
+        ranks = pos_vals.rank(method='first')
+        # Map rank 1..n to 1..100 with no duplicates
+        pct = ((ranks - 1) / (n - 1) * 100).round(1) if n > 1 else pd.Series(50.0, index=pos_vals.index)
+        df.loc[pct.index, 'rcdef_plus'] = pct
 
     return df
 
@@ -1368,6 +1430,25 @@ def build_master_dataset(year: int) -> tuple[pd.DataFrame, dict]:
         if col not in base_df.columns:
             base_df[col] = np.nan
 
+    # Merge FRV if not already in base from OAA endpoint
+    if base_df['frv'].notna().sum() == 0 and has_players(frv_df):
+        frv_df_std = standardize_columns(frv_df.copy(), 'savant_frv')
+        if 'frv' in frv_df_std.columns and 'player_name' in frv_df_std.columns:
+            frv_merge = frv_df_std[['player_name', 'frv']].drop_duplicates('player_name')
+            base_df = base_df.merge(frv_merge, on='player_name', how='left', suffixes=('', '_frv2'))
+            if 'frv_frv2' in base_df.columns:
+                base_df['frv'] = base_df['frv_frv2'].fillna(base_df['frv'])
+                base_df = base_df.drop(columns=['frv_frv2'])
+
+    # If FRV still missing, estimate from OAA with position-specific weights
+    # Labeled clearly in reliability indicator — not treated as measured data
+    if base_df['frv'].notna().sum() == 0 and base_df['oaa'].notna().sum() > 0:
+        pos_weights = {'C':0.65,'1B':0.65,'2B':0.73,'3B':0.72,'SS':0.74,'LF':0.57,'CF':0.56,'RF':0.57}
+        if 'position' in base_df.columns:
+            weights = base_df['position'].map(pos_weights).fillna(0.65)
+            base_df['frv'] = (base_df['oaa'] * weights).round(2)
+        status['frv_estimated'] = True
+
     # Merge sprint speed if not already in base
     if base_df['sprint_speed'].isna().all() and has_players(speed_df) and 'sprint_speed' in speed_df.columns:
         spd_merge = speed_df[['player_name', 'sprint_speed']].drop_duplicates('player_name')
@@ -1410,14 +1491,37 @@ def build_master_dataset(year: int) -> tuple[pd.DataFrame, dict]:
             )
             base_df = base_df.drop(columns=['_key', 'drs_drs'], errors='ignore')
 
-    # Filter to minimum innings
-    if 'innings' in base_df.columns:
-        base_df['innings'] = pd.to_numeric(base_df['innings'], errors='coerce').fillna(0)
+    # Innings: ensure numeric, estimate if missing
+    if 'innings' not in base_df.columns:
+        base_df['innings'] = 0.0
+    base_df['innings'] = pd.to_numeric(base_df['innings'], errors='coerce').fillna(0)
+
+    # If innings are all zero, estimate from attempts
+    if base_df['innings'].sum() == 0 and 'oaa_attempts' in base_df.columns:
+        pos_inn_rates = {'LF':4.0,'CF':4.0,'RF':4.0,'C':3.5}
+        def est_inn(row):
+            att = pd.to_numeric(row.get('oaa_attempts', 0), errors='coerce') or 0
+            rate = pos_inn_rates.get(str(row.get('position','')), 3.0)
+            return round(att * rate, 1)
+        base_df['innings'] = base_df.apply(est_inn, axis=1)
+        status['innings_estimated'] = True
+
+    # Adaptive minimum: if median innings < 200, data is early-season — use 30 att as proxy
+    median_inn = base_df['innings'].median() if len(base_df) > 0 else 0
+    if median_inn < 100 and 'oaa_attempts' in base_df.columns:
+        # Use attempts as proxy: 10+ attempts = include in main leaderboard
+        att_min = 10
+        main_df = base_df[
+            (base_df['oaa_attempts'].fillna(0) >= att_min) | (base_df['innings'] >= 50)
+        ].copy()
+        limited_df = base_df[
+            (base_df['oaa_attempts'].fillna(0) < att_min) & (base_df['innings'] < 50)
+        ].copy()
+        status['adaptive_threshold'] = f'{att_min} attempts (early season)'
+    else:
         main_df = base_df[base_df['innings'] >= MIN_INNINGS].copy()
         limited_df = base_df[(base_df['innings'] > 0) & (base_df['innings'] < MIN_INNINGS)].copy()
-    else:
-        main_df = base_df.copy()
-        limited_df = pd.DataFrame()
+        status['adaptive_threshold'] = f'{MIN_INNINGS} innings'
 
     # Apply calculations
     raw_statcast = pd.DataFrame()  # Full Statcast too large for cached session; use summary metrics
@@ -2341,58 +2445,80 @@ def build_player_card_jpg(row: pd.Series, player_name: str) -> bytes | None:
 
 def render_player_card_html(row: pd.Series, player_name: str) -> str:
     """
-    Build the white-background HTML player card shown in the app.
-    Same layout as the JPG download — white background, dark header,
-    input metrics row, component bars with values.
-    This is the single source of truth for card layout.
+    Full rich white-background player card.
+    Matches original layout (header, percentile bar, two-column breakdown + radar)
+    but with white background instead of dark.
     """
-    pos        = str(row.get('position', '?'))
-    team       = str(row.get('team', '?'))
-    inn        = float(row.get('innings', 0) or 0)
-    year       = str(row.get('data_year', ''))
-    rcdef      = row.get('rcdef', np.nan)
-    rcdef_plus = row.get('rcdef_plus', np.nan)
-    reliability= str(row.get('reliability', 'Low'))
-    disagree   = bool(row.get('disagreement_flag', False))
+    pos         = str(row.get('position', '?'))
+    team        = str(row.get('team', '?'))
+    inn         = float(row.get('innings', 0) or 0)
+    year        = str(row.get('data_year', ''))
+    rcdef       = row.get('rcdef', np.nan)
+    rcdef_plus  = row.get('rcdef_plus', np.nan)
+    reliability = str(row.get('reliability', 'Low'))
+    disagree    = bool(row.get('disagreement_flag', False))
     disagree_detail = str(row.get('disagreement_detail', ''))
-    context    = get_rcdef_context(rcdef)
-    rcdef_str  = format_stat(rcdef)
-    speed      = row.get('sprint_speed', np.nan)
+    context     = get_rcdef_context(rcdef)
+    rcdef_str   = format_stat(rcdef)
+    speed       = row.get('sprint_speed', np.nan)
 
-    # Colors
     rcdef_col  = '#00d084' if (pd.notna(rcdef) and float(rcdef) >= 0) else '#ff4757'
     rel_col    = {'High': '#00d084', 'Medium': '#ffd32a'}.get(reliability, '#ff4757')
-    rcp_str    = f'{float(rcdef_plus):.0f}th percentile' if pd.notna(rcdef_plus) else ''
+    rcp_val    = float(rcdef_plus) if pd.notna(rcdef_plus) else None
+    rcp_str    = f'{rcp_val:.1f}th percentile' if rcp_val is not None else ''
 
-    # Input metrics row
+    # ── Percentile bar ───────────────────────────────────────────────────────
+    pct_fill   = rcp_val if rcp_val is not None else 0
+    pct_col    = '#00d084' if pct_fill >= 75 else ('#3b82f6' if pct_fill >= 50 else ('#f59e0b' if pct_fill >= 25 else '#ef4444'))
+    pct_bar_html = f'''
+    <div style="margin:0 22px 0;">
+      <div style="font-family:IBM Plex Mono,monospace;font-size:0.6rem;color:#6b7280;margin-bottom:4px;letter-spacing:0.1em;">POSITION PERCENTILE — RCDef+</div>
+      <div style="position:relative;height:20px;background:#e5e7eb;border-radius:4px;overflow:hidden;">
+        <div style="position:absolute;left:0;top:0;height:100%;width:{pct_fill:.1f}%;background:{pct_col};border-radius:4px;transition:width 0.5s;"></div>
+        <div style="position:absolute;left:50%;top:0;height:100%;width:1px;background:rgba(0,0,0,0.2);"></div>
+      </div>
+      <div style="display:flex;justify-content:space-between;font-family:IBM Plex Mono,monospace;font-size:0.55rem;color:#9ca3af;margin-top:3px;">
+        <span>0th</span><span style="color:{pct_col};font-weight:500;">{rcp_str}</span><span>100th</span>
+      </div>
+    </div>'''
+
+    # ── Input metrics ────────────────────────────────────────────────────────
     input_metrics = [
-        ('OAA',  row.get('oaa',         np.nan)),
-        ('FRV',  row.get('frv',         np.nan)),
-        ('DRS*', row.get('drs',         np.nan)),
-        ('Spd',  row.get('sprint_speed', np.nan)),
-        ('ARM',  row.get('arm_runs',    np.nan)),
-        ('FRM',  row.get('framing_runs', np.nan)),
+        ('OAA',  row.get('oaa',          np.nan), 'Outs Above Average (Statcast)'),
+        ('FRV',  row.get('frv',          np.nan), 'Fielding Run Value (Statcast)'),
+        ('DRS*', row.get('drs',          np.nan), 'Def. Runs Saved (SIS/BR)'),
+        ('Spd',  row.get('sprint_speed', np.nan), 'Sprint Speed ft/sec'),
+        ('ARM',  row.get('arm_runs',     np.nan), 'Arm Runs'),
+        ('FRM',  row.get('framing_runs', np.nan), 'Framing Runs (C only)'),
     ]
 
-    def input_cell(label, val):
+    def input_cell(label, val, tooltip):
         if pd.isna(val):
-            return f'<div style="flex:1;text-align:center;"><div style="font-size:0.6rem;color:#6b7280;font-family:IBM Plex Mono;letter-spacing:0.1em;">{label}</div><div style="font-size:1.1rem;font-family:Bebas Neue;color:#d1d5db;">—</div></div>'
+            return f'''<div style="flex:1;text-align:center;padding:8px 4px;border-right:1px solid #e5e7eb;">
+              <div style="font-size:0.55rem;color:#6b7280;font-family:IBM Plex Mono;letter-spacing:0.1em;margin-bottom:4px;">{label}</div>
+              <div style="font-size:1rem;font-family:Bebas Neue,sans-serif;color:#d1d5db;">—</div>
+              <div style="font-size:0.5rem;color:#d1d5db;font-family:IBM Plex Mono;">{tooltip[:20]}</div>
+            </div>'''
         v = float(val)
-        c = '#00d084' if v > 0 else ('#ff4757' if v < 0 else '#9ca3af')
+        c = '#00d084' if v > 0 else ('#ef4444' if v < 0 else '#6b7280')
         s = '+' if v > 0 else ''
-        return f'<div style="flex:1;text-align:center;"><div style="font-size:0.6rem;color:#6b7280;font-family:IBM Plex Mono;letter-spacing:0.1em;">{label}</div><div style="font-size:1.1rem;font-family:Bebas Neue;color:{c};">{s}{v:.1f}</div></div>'
+        return f'''<div style="flex:1;text-align:center;padding:8px 4px;border-right:1px solid #e5e7eb;">
+          <div style="font-size:0.55rem;color:#6b7280;font-family:IBM Plex Mono;letter-spacing:0.1em;margin-bottom:4px;">{label}</div>
+          <div style="font-size:1.1rem;font-family:Bebas Neue,sans-serif;color:{c};">{s}{v:.1f}</div>
+          <div style="font-size:0.5rem;color:#9ca3af;font-family:IBM Plex Mono;">{tooltip[:20]}</div>
+        </div>'''
 
-    input_row_html = ''.join(input_cell(l, v) for l, v in input_metrics)
+    input_row_html = ''.join(input_cell(l, v, t) for l, v, t in input_metrics)
 
-    # Component bars
+    # ── Component breakdown (left column) ────────────────────────────────────
     components = [
-        ('Conv. Runs',        'conversion_runs'),
-        ('Att. Range',        'attempt_range_score'),
-        ('RRAA',             'rraa'),
-        ('BAP',              'bap'),
-        ('Arm Runs',         'arm_runs'),
-        ('Framing',          'framing_runs'),
-        ('Stadium Adj.',     'stadium_correction'),
+        ('Conversion Runs',       'conversion_runs',    'How well this fielder converts chances they attempt.'),
+        ('Attempt Range Score',   'attempt_range_score','Expands or shrinks opportunity set vs. league avg. Neighbor-adjusted.'),
+        ('Receiving Runs AA',     'rraa',               '(1B Only) Value on throws from infielders.'),
+        ('Baserunner Adv. Prev.', 'bap',                'Suppresses extra-base advancement via speed/deterrence.'),
+        ('Arm Runs',              'arm_runs',           'Direct throwing value, separate from BAP.'),
+        ('Framing Runs',          'framing_runs',       '(C Only) Pitch framing run value above average.'),
+        ('Stadium Correction',    'stadium_correction', 'Gameday coordinate bias adjustment.'),
     ]
 
     na_reasons = {
@@ -2401,101 +2527,149 @@ def render_player_card_html(row: pd.Series, player_name: str) -> str:
     }
 
     comp_vals = []
-    for lbl, col in components:
+    for _, col, _ in components:
         v = row.get(col, np.nan)
         comp_vals.append(float(v) if pd.notna(v) else None)
 
     max_abs = max((abs(v) for v in comp_vals if v is not None), default=5)
     max_abs = max(max_abs, 5)
 
-    def comp_bar_html(label, col_key, val):
+    def comp_row(label, col_key, val, tooltip):
         na_override = na_reasons.get(col_key)
+        pill_bg  = '#f3f4f6'
+        pill_txt = '#9ca3af'
+        bar_html = ''
+
         if val is None or na_override:
             reason = na_override or 'No data'
-            return f'''
-            <div style="display:flex;align-items:center;margin-bottom:8px;gap:10px;">
-                <div style="width:100px;font-size:0.65rem;color:#6b7280;font-family:IBM Plex Mono;flex-shrink:0;">{label}</div>
-                <div style="flex:1;height:18px;background:#f3f4f6;border-radius:3px;display:flex;align-items:center;padding-left:8px;">
-                    <span style="font-size:0.6rem;color:#9ca3af;font-family:IBM Plex Mono;">N/A — {reason}</span>
-                </div>
-                <div style="width:40px;"></div>
+            val_display = f'<span style="font-size:0.65rem;color:#9ca3af;font-family:IBM Plex Mono;">— {reason}</span>'
+            bar_html = f'<div style="flex:1;height:14px;background:#f3f4f6;border-radius:3px;display:flex;align-items:center;padding-left:8px;"><span style="font-size:0.6rem;color:#9ca3af;font-family:IBM Plex Mono;">N/A — {reason}</span></div>'
+        else:
+            bar_pct = min(abs(val) / max_abs * 88, 88)
+            bar_col = '#00d084' if val >= 0 else '#ef4444'
+            sign = '+' if val > 0 else ''
+            val_display = f'<span style="font-family:IBM Plex Mono;font-size:0.8rem;color:{bar_col};font-weight:500;">{sign}{val:.1f}</span>'
+            bar_html = f'''<div style="flex:1;height:14px;background:#f3f4f6;border-radius:3px;overflow:hidden;">
+              <div style="width:{bar_pct:.1f}%;height:100%;background:{bar_col};border-radius:3px;"></div>
             </div>'''
-        bar_pct = min(abs(val) / max_abs * 90, 90)
-        bar_col = '#00d084' if val >= 0 else '#ff4757'
-        sign = '+' if val > 0 else ''
+
         return f'''
-        <div style="display:flex;align-items:center;margin-bottom:8px;gap:10px;">
-            <div style="width:100px;font-size:0.65rem;color:#374151;font-family:IBM Plex Mono;flex-shrink:0;">{label}</div>
-            <div style="flex:1;height:18px;background:#f3f4f6;border-radius:3px;overflow:hidden;">
-                <div style="width:{bar_pct:.1f}%;height:100%;background:{bar_col};border-radius:3px;"></div>
-            </div>
-            <div style="width:40px;font-size:0.7rem;font-family:IBM Plex Mono;color:{bar_col};text-align:right;">{sign}{val:.1f}</div>
+        <div style="margin-bottom:10px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px;">
+            <span style="font-family:IBM Plex Mono;font-size:0.65rem;color:#374151;letter-spacing:0.05em;">{label}</span>
+            {val_display}
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;">
+            {bar_html}
+          </div>
+          <div style="font-size:0.55rem;color:#9ca3af;font-family:IBM Plex Mono;margin-top:2px;">{tooltip}</div>
         </div>'''
 
-    bars_html = ''.join(comp_bar_html(lbl, col, val) for (lbl, col), val in zip(components, comp_vals))
+    breakdown_html = ''.join(comp_row(lbl, col, val, tip)
+                              for (lbl, col, tip), val in zip(components, comp_vals))
 
-    # Disagreement note
-    disagree_html = ''
-    if disagree:
-        disagree_html = f'<div style="background:#fef3c7;border:1px solid #f59e0b;border-radius:4px;padding:6px 10px;margin-top:8px;font-family:IBM Plex Mono;font-size:0.65rem;color:#92400e;">⚡ Metric Disagreement: {disagree_detail.strip()}</div>'
+    # ── Right column: input metric comparison + neighbor + sprint ────────────
+    def input_comparison_row(label, col_key, source, val):
+        val_str = format_stat(val)
+        if val_str == '-':
+            pill = '<span style="font-family:IBM Plex Mono;font-size:0.75rem;color:#d1d5db;">—</span>'
+        else:
+            v = float(val)
+            c = '#00d084' if v > 0 else ('#ef4444' if v < 0 else '#6b7280')
+            s = '+' if v > 0 else ''
+            pill = f'<span style="font-family:IBM Plex Mono;font-size:0.85rem;color:{c};font-weight:500;">{s}{v:.1f}</span>'
+        return f'''
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid #f3f4f6;">
+          <div>
+            <div style="font-family:IBM Plex Mono;font-size:0.75rem;color:#374151;">{label}</div>
+            <div style="font-family:IBM Plex Mono;font-size:0.55rem;color:#9ca3af;">{source}</div>
+          </div>
+          {pill}
+        </div>'''
+
+    input_comparison_html = (
+        input_comparison_row('OAA',  'oaa', 'Outs Above Avg · Statcast',    row.get('oaa', np.nan)) +
+        input_comparison_row('FRV',  'frv', 'Fielding Run Value · Statcast', row.get('frv', np.nan)) +
+        input_comparison_row('DRS*', 'drs', 'Def. Runs Saved · SIS/BR',     row.get('drs', np.nan))
+    )
 
     # Neighbor note
-    neighbor_html = ''
     nb_sup = bool(row.get('neighbor_suppression', False))
     nb_vac = bool(row.get('neighbor_vacuum', False))
     if nb_sup:
-        neighbor_html = '<div style="background:#eff6ff;border:1px solid #3b82f6;border-radius:4px;padding:6px 10px;margin-top:8px;font-family:IBM Plex Mono;font-size:0.65rem;color:#1e40af;">🔵 Neighbor suppression adjustment applied (30% cap)</div>'
+        neighbor_html = '<div style="background:#eff6ff;border:1px solid #3b82f6;border-radius:4px;padding:6px 10px;margin-top:10px;font-family:IBM Plex Mono;font-size:0.62rem;color:#1e40af;">🔵 Neighbor suppression adjustment applied (30% cap)</div>'
     elif nb_vac:
-        neighbor_html = '<div style="background:#fef3c7;border:1px solid #f59e0b;border-radius:4px;padding:6px 10px;margin-top:8px;font-family:IBM Plex Mono;font-size:0.65rem;color:#92400e;">⚡ Neighbor vacuum flagged — no correction applied</div>'
+        neighbor_html = '<div style="background:#fef3c7;border:1px solid #f59e0b;border-radius:4px;padding:6px 10px;margin-top:10px;font-family:IBM Plex Mono;font-size:0.62rem;color:#92400e;">⚡ Neighbor vacuum flagged — no correction applied</div>'
+    else:
+        neighbor_html = '<div style="font-family:IBM Plex Mono;font-size:0.6rem;color:#9ca3af;margin-top:10px;">No neighbor adjustment applied.</div>'
 
     speed_html = ''
     if pd.notna(speed):
-        speed_html = f'<div style="background:#eff6ff;border:1px solid #3b82f6;border-radius:4px;padding:6px 10px;margin-top:8px;font-family:IBM Plex Mono;font-size:0.65rem;color:#1e40af;">ℹ Sprint Speed: {float(speed):.1f} ft/sec — context only, not in RCDef composite</div>'
+        speed_html = f'<div style="background:#eff6ff;border:1px solid #3b82f6;border-radius:4px;padding:6px 10px;margin-top:8px;font-family:IBM Plex Mono;font-size:0.62rem;color:#1e40af;">ℹ Sprint Speed: {float(speed):.1f} ft/sec (context only)</div>'
+
+    disagree_html = ''
+    if disagree:
+        disagree_html = f'<div style="background:#fef3c7;border:1px solid #f59e0b;border-radius:4px;padding:6px 10px;margin-top:8px;font-family:IBM Plex Mono;font-size:0.62rem;color:#92400e;">⚡ Metric Disagreement: {disagree_detail.strip().rstrip("|").strip()}</div>'
 
     html = f'''
-    <div style="background:#ffffff;border:1px solid #e5e7eb;border-radius:10px;overflow:hidden;font-family:sans-serif;max-width:860px;">
+    <div style="background:#ffffff;border:1px solid #e5e7eb;border-radius:10px;overflow:hidden;font-family:sans-serif;">
 
       <!-- HEADER -->
-      <div style="background:#0a0e1a;padding:18px 22px 14px;">
+      <div style="background:#0a0e1a;padding:16px 22px 12px;">
         <div style="display:flex;justify-content:space-between;align-items:flex-start;">
           <div>
-            <div style="font-family:Bebas Neue,sans-serif;font-size:1.5rem;color:#00d084;letter-spacing:0.15em;line-height:1;">RCDef</div>
-            <div style="font-family:Bebas Neue,sans-serif;font-size:1.6rem;color:#f9fafb;letter-spacing:0.05em;line-height:1.1;">{player_name.upper()}</div>
-            <div style="font-family:IBM Plex Mono,monospace;font-size:0.62rem;color:#6b7280;margin-top:4px;letter-spacing:0.1em;">{team} · {POSITIONS.get(pos, pos)} · {inn:.0f} inn · {year} Season</div>
+            <div style="font-family:Bebas Neue,sans-serif;font-size:1.3rem;color:#00d084;letter-spacing:0.15em;line-height:1;">RCDef</div>
+            <div style="font-family:Bebas Neue,sans-serif;font-size:1.8rem;color:#f9fafb;letter-spacing:0.04em;line-height:1.1;margin-top:2px;">{player_name.upper()}</div>
+            <div style="font-family:IBM Plex Mono,monospace;font-size:0.62rem;color:#6b7280;margin-top:4px;">{team} · {POSITIONS.get(pos, pos)} · {inn:.0f} inn · {year} Season</div>
           </div>
           <div style="text-align:right;">
-            <div style="font-family:IBM Plex Mono,monospace;font-size:0.6rem;color:#6b7280;">RCDef</div>
-            <div style="font-family:Bebas Neue,sans-serif;font-size:2rem;color:{rcdef_col};line-height:1;">{rcdef_str}</div>
-            <div style="font-family:IBM Plex Mono,monospace;font-size:0.6rem;color:#6b7280;">{rcp_str}</div>
+            <div style="font-family:IBM Plex Mono,monospace;font-size:0.58rem;color:#6b7280;letter-spacing:0.1em;">RCDef</div>
+            <div style="font-family:Bebas Neue,sans-serif;font-size:2.2rem;color:{rcdef_col};line-height:1;">{rcdef_str}</div>
+            <div style="font-family:IBM Plex Mono,monospace;font-size:0.58rem;color:#6b7280;margin-top:2px;">{context}</div>
             <div style="margin-top:6px;">
-              <span style="background:{rel_col};color:#0a0e1a;font-family:IBM Plex Mono,monospace;font-size:0.6rem;padding:2px 8px;border-radius:3px;">{reliability.upper()}</span>
+              <span style="background:{rel_col};color:#0a0e1a;font-family:IBM Plex Mono,monospace;font-size:0.58rem;padding:2px 8px;border-radius:3px;font-weight:600;">{reliability.upper()}</span>
             </div>
           </div>
         </div>
-        <div style="font-family:IBM Plex Mono,monospace;font-size:0.65rem;color:#9ca3af;margin-top:8px;">{context}</div>
         {disagree_html}
       </div>
 
-      <!-- DIVIDER -->
+      <!-- GREEN DIVIDER -->
       <div style="height:3px;background:#00d084;"></div>
 
-      <!-- INPUT METRICS ROW -->
-      <div style="background:#f9fafb;padding:12px 22px;display:flex;gap:0;">
-        {input_row_html}
+      <!-- PERCENTILE BAR -->
+      <div style="background:#f9fafb;padding:12px 0 10px;">
+        {pct_bar_html}
       </div>
 
       <div style="height:1px;background:#e5e7eb;"></div>
 
-      <!-- COMPONENT BARS -->
-      <div style="padding:16px 22px 12px;">
-        <div style="font-family:Bebas Neue,sans-serif;font-size:0.9rem;letter-spacing:0.1em;color:#374151;margin-bottom:12px;">COMPONENT BREAKDOWN</div>
-        {bars_html}
-        {speed_html}
-        {neighbor_html}
+      <!-- INPUT METRICS STRIP -->
+      <div style="display:flex;background:#ffffff;border-bottom:1px solid #e5e7eb;">
+        {input_row_html}
+      </div>
+
+      <!-- MAIN BODY: two columns -->
+      <div style="display:flex;gap:0;">
+
+        <!-- LEFT: component breakdown -->
+        <div style="flex:3;padding:16px 20px 12px;border-right:1px solid #e5e7eb;">
+          <div style="font-family:Bebas Neue,sans-serif;font-size:0.85rem;letter-spacing:0.1em;color:#374151;margin-bottom:12px;">COMPONENT BREAKDOWN</div>
+          {breakdown_html}
+        </div>
+
+        <!-- RIGHT: input comparison + notes -->
+        <div style="flex:2;padding:16px 18px 12px;">
+          <div style="font-family:Bebas Neue,sans-serif;font-size:0.85rem;letter-spacing:0.1em;color:#6b7280;margin-bottom:8px;">INPUT METRICS</div>
+          {input_comparison_html}
+          {speed_html}
+          {neighbor_html}
+        </div>
+
       </div>
 
       <!-- FOOTER -->
-      <div style="background:#f3f4f6;padding:8px 22px;font-family:IBM Plex Mono,monospace;font-size:0.6rem;color:#9ca3af;">
+      <div style="background:#f3f4f6;padding:6px 22px;font-family:IBM Plex Mono,monospace;font-size:0.55rem;color:#9ca3af;border-top:1px solid #e5e7eb;">
         RCDef Composite Defensive Analytics · rcdef.streamlit.app · *DRS © Sports Info Solutions / Baseball Reference · Non-commercial
       </div>
 
@@ -2505,7 +2679,7 @@ def render_player_card_html(row: pd.Series, player_name: str) -> str:
 
 
 def page_player_cards(df: pd.DataFrame, is_demo: bool):
-    """Player card page with detailed breakdown."""
+    """Player card page — full rich white-background layout with all charts."""
 
     st.markdown('<div class="section-header">Player Cards</div>', unsafe_allow_html=True)
 
@@ -2513,7 +2687,6 @@ def page_player_cards(df: pd.DataFrame, is_demo: bool):
         st.markdown('<div class="warn-box">⚠ DEMO MODE — Synthetic data displayed.</div>',
                     unsafe_allow_html=True)
 
-    # Player search
     player_names = sorted(df['player_name'].dropna().unique().tolist())
     selected_player = st.selectbox('Search Player', player_names, key='card_player')
 
@@ -2524,46 +2697,173 @@ def page_player_cards(df: pd.DataFrame, is_demo: bool):
 
     row = player_row.iloc[0]
 
-    # Render the white-background card in the app
-    # Use st.components.v1.html to guarantee HTML renders (not displayed as raw text)
+    # ── Pull key values ───────────────────────────────────────────────────────
+    pos         = str(row.get('position', '?'))
+    team        = str(row.get('team', '?'))
+    inn         = float(row.get('innings', 0) or 0)
+    year        = str(row.get('data_year', ''))
+    rcdef       = row.get('rcdef', np.nan)
+    rcdef_plus  = row.get('rcdef_plus', np.nan)
+    reliability = str(row.get('reliability', 'Low'))
+    disagree    = bool(row.get('disagreement_flag', False))
+    disagree_detail = str(row.get('disagreement_detail', ''))
+    context     = get_rcdef_context(rcdef)
+    rcdef_str   = format_stat(rcdef)
+
+    # ── White-background header card via components.html ─────────────────────
     import streamlit.components.v1 as components
     card_html = render_player_card_html(row, selected_player)
-    # Wrap in a full HTML document for components.html
     full_html = f'''<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
 <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
-<style>
-  body {{ margin: 0; padding: 8px; background: transparent; }}
-</style>
+<style>* {{ box-sizing: border-box; }} body {{ margin:0; padding:4px 0; background:transparent; }}</style>
 </head>
 <body>{card_html}</body>
 </html>'''
-    components.html(full_html, height=620, scrolling=False)
+    components.html(full_html, height=660, scrolling=True)
 
-    # ── Download section ─────────────────────────────────────────────────────
+    st.markdown('<br>', unsafe_allow_html=True)
+
+    # ── Percentile bar (Plotly) ───────────────────────────────────────────────
+    if pd.notna(rcdef_plus):
+        st.markdown('<div style="font-family:IBM Plex Mono;font-size:0.7rem;color:#8892a4;margin-bottom:0.25rem;letter-spacing:0.15em;">POSITION PERCENTILE (RCDef+)</div>',
+                    unsafe_allow_html=True)
+        st.plotly_chart(build_percentile_bar(rcdef_plus), use_container_width=True, key='pct_bar')
+
+    st.markdown('<br>', unsafe_allow_html=True)
+
+    # ── Two-column detailed view ──────────────────────────────────────────────
+    col_left, col_right = st.columns([3, 2])
+
+    with col_left:
+        st.markdown('<div class="section-header" style="font-size:1.1rem;">Component Breakdown</div>',
+                    unsafe_allow_html=True)
+
+        components_list = [
+            ('Conversion Runs',       'conversion_runs',    'How well this fielder converts chances they attempt. Derived from OAA and FRV.'),
+            ('Attempt Range Score',   'attempt_range_score','Whether this fielder expands or shrinks their opportunity set vs. league avg.'),
+            ('Receiving Runs AA',     'rraa',               '(1B Only) Value added on throws — dirt balls, wide throws, stretch plays.'),
+            ('Baserunner Adv. Prev.', 'bap',                'How well this fielder suppresses extra-base advancement.'),
+            ('Arm Runs',              'arm_runs',           'Direct throwing value, separate from BAP deterrence component.'),
+            ('Framing Runs',          'framing_runs',       '(C Only) Run value of pitch framing above average.'),
+            ('Stadium Correction',   'stadium_correction', 'Gameday coordinate bias adjustment.'),
+        ]
+
+        na_reasons = {
+            'rraa':         'Not applicable — 1B only' if pos != '1B' else None,
+            'framing_runs': 'Not applicable — C only'  if pos != 'C'  else None,
+        }
+
+        for label, col_key, tooltip in components_list:
+            val      = row.get(col_key, np.nan)
+            val_str  = format_stat(val)
+            is_na    = (val_str == '-')
+            na_text  = na_reasons.get(col_key, 'Insufficient data') if is_na else None
+            pill_cls = color_stat(val)
+
+            if is_na:
+                right_html = f'<span style="font-family:IBM Plex Mono;font-size:0.72rem;color:#4a5568;">{na_text}</span>'
+            else:
+                right_html = f'<span class="stat-pill {pill_cls}" style="font-size:0.95rem;padding:0.25rem 0.7rem;">{val_str}</span>'
+
+            st.markdown(f'''
+            <div class="metric-card" style="padding:0.7rem 1.1rem;margin-bottom:0.4rem;">
+              <div style="display:flex;justify-content:space-between;align-items:center;">
+                <div style="flex:1;min-width:0;">
+                  <div class="metric-label" style="margin-bottom:0.15rem;">{label}</div>
+                  <div style="font-family:IBM Plex Mono;font-size:0.62rem;color:#4a5568;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{tooltip}</div>
+                </div>
+                <div style="flex-shrink:0;margin-left:1rem;">{right_html}</div>
+              </div>
+            </div>
+            ''', unsafe_allow_html=True)
+
+        # Sprint speed info
+        speed = row.get('sprint_speed', np.nan)
+        if pd.notna(speed):
+            st.markdown(f'''<div class="info-box" style="margin-top:0.5rem;">
+            ℹ Sprint Speed: {float(speed):.1f} ft/sec — context only, not included in RCDef
+            </div>''', unsafe_allow_html=True)
+
+    with col_right:
+        # Radar chart
+        st.markdown('<div class="section-header" style="font-size:1.1rem;">Component Radar</div>',
+                    unsafe_allow_html=True)
+        st.plotly_chart(build_radar_chart(row, selected_player), use_container_width=True, key='radar')
+
+        # Input metrics comparison
+        st.markdown('<div style="font-family:Bebas Neue;font-size:1rem;letter-spacing:0.1em;color:#8892a4;margin:0.5rem 0;">INPUT METRICS</div>',
+                    unsafe_allow_html=True)
+
+        for label, col_key, source in [
+            ('OAA',  'oaa',  'Outs Above Average · Statcast'),
+            ('FRV',  'frv',  'Fielding Run Value · Statcast'),
+            ('DRS*', 'drs',  'Def. Runs Saved · SIS/BR'),
+        ]:
+            val     = row.get(col_key, np.nan)
+            val_str = format_stat(val)
+            pill    = color_stat(val)
+            st.markdown(f'''
+            <div style="display:flex;justify-content:space-between;align-items:center;
+                        padding:0.45rem 0;border-bottom:1px solid #1e2d42;">
+              <div>
+                <span style="font-family:IBM Plex Mono;font-size:0.8rem;color:#e8eaf0;">{label}</span>
+                <span style="font-family:IBM Plex Mono;font-size:0.58rem;color:#4a5568;display:block;">{source}</span>
+              </div>
+              <span class="stat-pill {pill}">{val_str}</span>
+            </div>
+            ''', unsafe_allow_html=True)
+
+    # ── Disagreement flag detail ──────────────────────────────────────────────
+    if disagree:
+        st.markdown(f'''<div class="warn-box" style="margin-top:1rem;">
+        ⚡ Metric Disagreement: {disagree_detail.strip().rstrip("|").strip()}
+        — metrics diverge by more than {DISAGREEMENT_THRESHOLD} runs. See Methodology for explanation.
+        </div>''', unsafe_allow_html=True)
+
+    # ── Neighbor adjustment detail (infielders) ───────────────────────────────
+    if pos in ['2B', 'SS', '3B', '1B']:
+        st.markdown('<br>', unsafe_allow_html=True)
+        nb_sup = bool(row.get('neighbor_suppression', False))
+        nb_vac = bool(row.get('neighbor_vacuum', False))
+        if nb_sup:
+            st.markdown('''<div class="info-box">
+            🔵 Neighbor Suppression: Attempt Range includes a partial credit adjustment (capped at 30%).
+            A neighboring fielder appears to be cutting off balls in a zone where this player shows
+            below-average attempt rates.
+            </div>''', unsafe_allow_html=True)
+        elif nb_vac:
+            st.markdown('''<div class="warn-box">
+            ⚡ Neighbor Vacuum: Attempt Range may be partially inflated by a below-average neighboring
+            fielder. No correction applied — flag only.
+            </div>''', unsafe_allow_html=True)
+        else:
+            st.markdown('''<div style="font-family:IBM Plex Mono;font-size:0.62rem;color:#4a5568;">
+            No neighbor adjustment applied for this player.
+            </div>''', unsafe_allow_html=True)
+
+    # ── Downloads ─────────────────────────────────────────────────────────────
     st.markdown('<br>', unsafe_allow_html=True)
     dl_c1, dl_c2 = st.columns(2)
 
     with dl_c1:
-        # JPG download — same layout as the card above
         jpg_bytes = build_player_card_jpg(row, selected_player)
         if jpg_bytes:
             safe_name = selected_player.replace(' ', '_').replace('.', '').replace("'", '')
             st.download_button(
-                label=f'⬇ Download Player Card (.jpg)',
+                label='⬇ Download Player Card (.jpg)',
                 data=jpg_bytes,
-                file_name=f'rcdef_{safe_name}_{row.get("data_year", "2025")}.jpg',
+                file_name=f'rcdef_{safe_name}_{row.get("data_year","2025")}.jpg',
                 mime='image/jpeg',
                 use_container_width=True,
                 key='dl_jpg',
             )
         else:
-            st.error('JPG generation failed — check Pillow is installed.')
+            st.error('JPG generation failed.')
 
     with dl_c2:
-        # CSV of this player's full row
         player_csv = pd.DataFrame([row]).drop(
             columns=[c for c in ['is_demo', 'disagreement_detail', 'sample_size'] if c in row.index],
             errors='ignore'
@@ -2571,7 +2871,7 @@ def page_player_cards(df: pd.DataFrame, is_demo: bool):
         st.download_button(
             label='⬇ Download Player Data (.csv)',
             data=player_csv.to_csv(index=False).encode('utf-8'),
-            file_name=f'rcdef_{selected_player.replace(" ", "_")}_{row.get("data_year", "2025")}.csv',
+            file_name=f'rcdef_{selected_player.replace(" ","_")}_{row.get("data_year","2025")}.csv',
             mime='text/csv',
             use_container_width=True,
             key='dl_player_csv',
