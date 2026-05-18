@@ -337,105 +337,187 @@ STADIUM_CORRECTIONS = {
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_savant_oaa(year: int, position: str = 'all') -> pd.DataFrame:
     """
-    Pull Outs Above Average from Baseball Savant CSV endpoint.
-    Returns empty DataFrame on failure with schema preserved.
+    Pull Outs Above Average via pybaseball (statcast_fielding).
+    Falls back to direct HTTP request if pybaseball fails.
+    Savant CSV columns: last_name, ' first_name' (leading space), player_id,
+    team_name_alt, primary_pos_formatted, attempts, outs_above_average, inn.
     """
-    pos_map = {
-        'all': 'all', 'C': '2', '1B': '3', '2B': '4',
-        '3B': '5', 'SS': '6', 'LF': '7', 'CF': '8', 'RF': '9'
-    }
-    pos_code = pos_map.get(position, 'all')
-    url = (
-        f"https://baseballsavant.mlb.com/leaderboard/outs_above_average"
-        f"?type=Fielder&year={year}&team=&range=year&min=q"
-        f"&pos={pos_code}&roles=&viz=show&csv=true"
-    )
+    # pybaseball path — handles session/cookie management automatically
     try:
+        from pybaseball import statcast_fielding
+        # pos='all' not supported; pull each position group separately
+        pos_codes = {'all': 'all'}
+        dfs = []
+        for label, code in pos_codes.items():
+            try:
+                df = statcast_fielding(year, pos=code, min_att=1)
+                if df is not None and not df.empty and 'Host not in allowlist' not in str(df.columns):
+                    dfs.append(df)
+                    break
+            except Exception:
+                pass
+        if dfs:
+            result = pd.concat(dfs, ignore_index=True)
+            result['data_year'] = year
+            result['data_source'] = 'savant_oaa'
+            return result
+    except Exception:
+        pass
+
+    # Direct HTTP fallback with browser-like headers
+    try:
+        url = (
+            f"https://baseballsavant.mlb.com/leaderboard/outs_above_average"
+            f"?type=Fielder&year={year}&team=&range=year&min=1&pos=all&roles=&viz=show&csv=true"
+        )
         headers = {
-            'User-Agent': 'Mozilla/5.0 (compatible; RCDef/1.0; baseball analytics)'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Referer': 'https://baseballsavant.mlb.com/',
         }
-        r = requests.get(url, headers=headers, timeout=15)
-        if r.status_code == 200 and len(r.text) > 100:
+        r = requests.get(url, headers=headers, timeout=20)
+        if r.status_code == 200 and len(r.text) > 200 and 'last_name' in r.text:
             df = pd.read_csv(io.StringIO(r.text))
             df['data_year'] = year
             df['data_source'] = 'savant_oaa'
             return df
-    except Exception as e:
+    except Exception:
         pass
+
     return pd.DataFrame()
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_savant_frv(year: int) -> pd.DataFrame:
-    """Pull Fielding Run Value from Baseball Savant."""
-    url = (
-        f"https://baseballsavant.mlb.com/leaderboard/fielding-run-value"
-        f"?year={year}&team=&position=&min=q&csv=true"
-    )
+    """
+    Pull Fielding Run Value from Baseball Savant.
+    FRV is on the OAA leaderboard as 'fielding_run_value' column.
+    Also contains arm_runs, reaction_runs, positioning_runs.
+    """
     try:
-        headers = {'User-Agent': 'Mozilla/5.0 (compatible; RCDef/1.0)'}
-        r = requests.get(url, headers=headers, timeout=15)
-        if r.status_code == 200 and len(r.text) > 100:
+        from pybaseball import statcast_fielding
+        df = statcast_fielding(year, pos='all', min_att=1)
+        if df is not None and not df.empty and 'Host not in allowlist' not in str(df.columns):
+            # FRV is included in OAA endpoint as fielding_run_value
+            df['data_year'] = year
+            df['data_source'] = 'savant_frv'
+            return df
+    except Exception:
+        pass
+
+    try:
+        # FRV leaderboard endpoint
+        url = (
+            f"https://baseballsavant.mlb.com/leaderboard/outs_above_average"
+            f"?type=Fielder&year={year}&team=&range=year&min=1&pos=all&roles=&viz=show&csv=true"
+        )
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Referer': 'https://baseballsavant.mlb.com/',
+        }
+        r = requests.get(url, headers=headers, timeout=20)
+        if r.status_code == 200 and 'last_name' in r.text:
             df = pd.read_csv(io.StringIO(r.text))
             df['data_year'] = year
             df['data_source'] = 'savant_frv'
             return df
     except Exception:
         pass
+
     return pd.DataFrame()
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_savant_sprint_speed(year: int) -> pd.DataFrame:
-    """Pull sprint speed from Baseball Savant."""
-    url = (
-        f"https://baseballsavant.mlb.com/leaderboard/sprint_speed"
-        f"?year={year}&team=&position=&min=10&csv=true"
-    )
+    """
+    Pull sprint speed via pybaseball (statcast_sprint_speed).
+    Columns: last_name, first_name, player_id, year, team, sprint_speed, hp_to_1b, bolts.
+    """
     try:
-        headers = {'User-Agent': 'Mozilla/5.0 (compatible; RCDef/1.0)'}
-        r = requests.get(url, headers=headers, timeout=15)
-        if r.status_code == 200 and len(r.text) > 100:
-            df = pd.read_csv(io.StringIO(r.text))
+        from pybaseball import statcast_sprint_speed
+        df = statcast_sprint_speed(year, min_opp=5)
+        if df is not None and not df.empty and 'Host not in allowlist' not in str(df.columns):
             df['data_year'] = year
+            df['data_source'] = 'savant_sprint'
             return df
     except Exception:
         pass
+
+    try:
+        url = (
+            f"https://baseballsavant.mlb.com/leaderboard/sprint_speed"
+            f"?year={year}&position=&team=&min=5&csv=true"
+        )
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Referer': 'https://baseballsavant.mlb.com/',
+        }
+        r = requests.get(url, headers=headers, timeout=15)
+        if r.status_code == 200 and 'sprint_speed' in r.text:
+            df = pd.read_csv(io.StringIO(r.text))
+            df['data_year'] = year
+            df['data_source'] = 'savant_sprint'
+            return df
+    except Exception:
+        pass
+
     return pd.DataFrame()
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def fetch_savant_arm(year: int) -> pd.DataFrame:
-    """Pull arm strength/value data from Savant."""
-    url = (
-        f"https://baseballsavant.mlb.com/leaderboard/arm-strength"
-        f"?year={year}&team=&position=&min=q&csv=true"
-    )
+def fetch_savant_poptime(year: int) -> pd.DataFrame:
+    """
+    Pull catcher pop time / arm data via pybaseball.
+    Columns: last_name, first_name, pop_2b_sba, exchange_2b_3b_sba, maxeff_arm_2b_3b_sba.
+    """
     try:
-        headers = {'User-Agent': 'Mozilla/5.0 (compatible; RCDef/1.0)'}
+        from pybaseball import statcast_fielding
+        # poptime is a separate leaderboard
+        url = (
+            f"https://baseballsavant.mlb.com/leaderboard/poptime"
+            f"?year={year}&team=&min2b=5&min3b=0&csv=true"
+        )
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Referer': 'https://baseballsavant.mlb.com/',
+        }
         r = requests.get(url, headers=headers, timeout=15)
-        if r.status_code == 200 and len(r.text) > 100:
+        if r.status_code == 200 and 'last_name' in r.text:
             df = pd.read_csv(io.StringIO(r.text))
             df['data_year'] = year
+            df['data_source'] = 'savant_arm'
             return df
     except Exception:
         pass
     return pd.DataFrame()
+
+
+# Keep old name as alias for compatibility
+def fetch_savant_arm(year: int) -> pd.DataFrame:
+    return fetch_savant_poptime(year)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_savant_framing(year: int) -> pd.DataFrame:
-    """Pull catcher framing data from Savant."""
-    url = (
-        f"https://baseballsavant.mlb.com/leaderboard/framing"
-        f"?year={year}&team=&min=q&csv=true"
-    )
+    """
+    Pull catcher framing data from Savant.
+    Columns: last_name, first_name, runs_extra_strikes (= framing_runs), inn.
+    """
     try:
-        headers = {'User-Agent': 'Mozilla/5.0 (compatible; RCDef/1.0)'}
+        url = (
+            f"https://baseballsavant.mlb.com/catcher_framing"
+            f"?year={year}&team=&min=100&sort=4,1&csv=true"
+        )
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Referer': 'https://baseballsavant.mlb.com/',
+        }
         r = requests.get(url, headers=headers, timeout=15)
-        if r.status_code == 200 and len(r.text) > 100:
+        if r.status_code == 200 and 'last_name' in r.text:
             df = pd.read_csv(io.StringIO(r.text))
             df['data_year'] = year
+            df['data_source'] = 'savant_framing'
             return df
     except Exception:
         pass
@@ -523,57 +605,81 @@ def standardize_player_name(name: str) -> str:
     return name.lower().strip()
 
 
+def combine_savant_name(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Savant CSVs export player names as two separate columns:
+    'last_name' and ' first_name' (note leading space in header).
+    Strip all column whitespace then combine into player_name.
+    """
+    df.columns = df.columns.str.strip()
+    if 'last_name' in df.columns and 'first_name' in df.columns:
+        df['player_name'] = df['first_name'].str.strip() + ' ' + df['last_name'].str.strip()
+        df = df.drop(columns=['last_name', 'first_name'], errors='ignore')
+    elif 'player_name' not in df.columns:
+        # Fallback: look for any name-like column
+        for c in df.columns:
+            if c.lower() in ['name', 'player']:
+                df['player_name'] = df[c]
+                break
+    return df
+
+
 def standardize_columns(df: pd.DataFrame, source: str) -> pd.DataFrame:
     """
     Standardize column names across different Savant/BR endpoints.
-    Each source uses slightly different naming conventions.
+    Step 1: strip whitespace from all column names (Savant adds leading spaces).
+    Step 2: combine last_name + first_name into player_name.
+    Step 3: rename to canonical column names.
     """
     if df.empty:
         return df
 
+    # Always strip column name whitespace first — Savant CSV quirk
+    df.columns = df.columns.str.strip()
+
+    # Combine name columns
+    df = combine_savant_name(df)
+
     col_maps = {
         'savant_oaa': {
-            'last_name, first_name': 'player_name',
             'outs_above_average': 'oaa',
+            'fielding_run_value': 'frv',
             'team_name_alt': 'team',
+            'team_name': 'team_long',
             'primary_pos_formatted': 'position',
             'inn': 'innings',
             'attempts': 'oaa_attempts',
         },
         'savant_frv': {
-            'last_name, first_name': 'player_name',
             'fielding_run_value': 'frv',
             'team_name_alt': 'team',
-            'pos': 'position',
+            'team_name': 'team_long',
+            'primary_pos_formatted': 'position',
             'inn': 'innings',
+            'attempts': 'oaa_attempts',
+        },
+        'savant_sprint': {
+            # sprint speed uses 'team' directly, no _alt suffix
+            'sprint_speed': 'sprint_speed',
         },
         'savant_arm': {
-            'last_name, first_name': 'player_name',
-            'pop_time': 'pop_time',
-            'exchange_time': 'exchange_time',
-            'arm_value': 'arm_runs',
+            # poptime endpoint
+            'pop_2b_sba': 'pop_time',
+            'exchange_2b_3b_sba': 'exchange_time',
+            'maxeff_arm_2b_3b_sba': 'arm_strength',
         },
         'savant_framing': {
-            'last_name, first_name': 'player_name',
-            'framing_runs': 'framing_runs',
             'runs_extra_strikes': 'framing_runs',
+            'team_name_alt': 'team',
+            'inn': 'innings',
         },
     }
 
     source_map = col_maps.get(source, {})
     df = df.rename(columns=source_map)
 
-    # Handle "Last, First" format
-    if 'player_name' in df.columns:
-        def fix_name(n):
-            if pd.isna(n):
-                return n
-            n = str(n)
-            if ',' in n:
-                parts = n.split(',', 1)
-                return f"{parts[1].strip()} {parts[0].strip()}"
-            return n
-        df['player_name'] = df['player_name'].apply(fix_name)
+    # Drop duplicate columns that may arise from multiple aliases mapping to same canonical name
+    df = df.loc[:, ~df.columns.duplicated(keep='first')]
 
     return df
 
@@ -1044,84 +1150,143 @@ def build_master_dataset(year: int) -> tuple[pd.DataFrame, dict]:
         drs_df = fetch_br_drs(year)
         status['drs'] = get_data_status(drs_df, 'Baseball Reference / SIS DRS')
 
-    # Standardize column names
-    if not oaa_df.empty:
-        oaa_df = standardize_columns(oaa_df, 'savant_oaa')
-    if not frv_df.empty:
-        frv_df = standardize_columns(frv_df, 'savant_frv')
-    if not arm_df.empty:
-        arm_df = standardize_columns(arm_df, 'savant_arm')
+    # Standardize all dataframes — strip whitespace from columns, combine name fields
+    def prep(df, source):
+        if df.empty:
+            return df
+        return standardize_columns(df, source)
 
-    # Build base dataframe from OAA (most complete player list)
-    # Fall back to FRV if OAA unavailable
-    if not oaa_df.empty and 'player_name' in oaa_df.columns:
-        base_df = oaa_df[['player_name', 'data_year', 'team', 'position', 'innings', 'oaa', 'oaa_attempts']].copy()
-    elif not frv_df.empty and 'player_name' in frv_df.columns:
-        base_df = frv_df[['player_name', 'data_year', 'team', 'position', 'innings']].copy()
-        base_df['oaa'] = np.nan
-        base_df['oaa_attempts'] = np.nan
+    oaa_df     = prep(oaa_df,     'savant_oaa')
+    frv_df     = prep(frv_df,     'savant_frv')
+    speed_df   = prep(speed_df,   'savant_sprint')
+    arm_df     = prep(arm_df,     'savant_arm')
+    framing_df = prep(framing_df, 'savant_framing')
+
+    # Log column schemas for diagnostics download
+    status['oaa_cols']     = list(oaa_df.columns)     if not oaa_df.empty     else []
+    status['frv_cols']     = list(frv_df.columns)     if not frv_df.empty     else []
+    status['speed_cols']   = list(speed_df.columns)   if not speed_df.empty   else []
+    status['arm_cols']     = list(arm_df.columns)     if not arm_df.empty     else []
+    status['framing_cols'] = list(framing_df.columns) if not framing_df.empty else []
+
+    def has_players(df):
+        """Check df has meaningful player data."""
+        return (
+            not df.empty and
+            'player_name' in df.columns and
+            len(df) > 3 and
+            df['player_name'].notna().sum() > 3
+        )
+
+    def pick_col(df, options):
+        """Return first matching column name from options list."""
+        for opt in options:
+            if opt in df.columns:
+                return opt
+        return None
+
+    # Build base dataframe from OAA (most complete player list).
+    # The Savant OAA endpoint also contains FRV, arm_runs, sprint_speed
+    # in the same CSV response — extract everything in one pass.
+    if has_players(oaa_df):
+        base_df = oaa_df.copy()
+        # Canonical column mapping — the OAA endpoint has many columns
+        for canonical, options in {
+            'team':         ['team', 'team_name_alt', 'team_name'],
+            'position':     ['position', 'primary_pos_formatted', 'pos'],
+            'innings':      ['innings', 'inn'],
+            'oaa':          ['oaa', 'outs_above_average'],
+            'oaa_attempts': ['oaa_attempts', 'attempts', 'n_attempts'],
+            'frv':          ['frv', 'fielding_run_value'],
+            'arm_runs':     ['arm_runs'],
+            'sprint_speed': ['sprint_speed'],
+        }.items():
+            existing = pick_col(base_df, options)
+            if existing and existing != canonical:
+                base_df[canonical] = base_df[existing]
+        # Keep only canonical columns that exist
+        keep = ['player_name', 'data_year', 'team', 'position', 'innings',
+                'oaa', 'oaa_attempts', 'frv', 'arm_runs', 'sprint_speed']
+        base_df = base_df[[c for c in keep if c in base_df.columns]].copy()
+        status['mode'] = 'live'
+        status['base_source'] = 'Savant OAA'
+
+    elif has_players(frv_df):
+        base_df = frv_df.copy()
+        for canonical, options in {
+            'team':     ['team', 'team_name_alt'],
+            'position': ['position', 'primary_pos_formatted', 'pos'],
+            'innings':  ['innings', 'inn'],
+            'frv':      ['frv', 'fielding_run_value'],
+            'oaa':      ['oaa', 'outs_above_average'],
+        }.items():
+            existing = pick_col(base_df, options)
+            if existing and existing != canonical:
+                base_df[canonical] = base_df[existing]
+        keep = ['player_name', 'data_year', 'team', 'position', 'innings', 'frv', 'oaa']
+        base_df = base_df[[c for c in keep if c in base_df.columns]].copy()
+        status['mode'] = 'live'
+        status['base_source'] = 'Savant FRV'
+
     else:
-        # No live data available - return empty with schema
         empty_df = build_demo_dataset(year)
         status['mode'] = 'demo'
+        status['demo_reason'] = (
+            f"OAA: {status['oaa']['rows']} rows, "
+            f"player_name={'YES' if has_players(oaa_df) else 'NO'} | "
+            f"FRV: {status['frv']['rows']} rows, "
+            f"player_name={'YES' if has_players(frv_df) else 'NO'} | "
+            f"OAA cols: {status['oaa_cols'][:5]}"
+        )
         return empty_df, status
 
-    status['mode'] = 'live'
+    # Ensure required columns exist with NaN defaults
+    for col in ['oaa', 'frv', 'oaa_attempts', 'arm_runs', 'sprint_speed',
+                'framing_runs', 'drs']:
+        if col not in base_df.columns:
+            base_df[col] = np.nan
 
-    # Merge FRV
-    if not frv_df.empty and 'player_name' in frv_df.columns and 'frv' in frv_df.columns:
-        frv_merge = frv_df[['player_name', 'frv']].copy()
-        base_df = base_df.merge(frv_merge, on='player_name', how='left')
-    else:
-        base_df['frv'] = np.nan
+    # Merge sprint speed if not already in base
+    if base_df['sprint_speed'].isna().all() and has_players(speed_df) and 'sprint_speed' in speed_df.columns:
+        spd_merge = speed_df[['player_name', 'sprint_speed']].drop_duplicates('player_name')
+        base_df = base_df.merge(spd_merge, on='player_name', how='left', suffixes=('', '_spd'))
+        if 'sprint_speed_spd' in base_df.columns:
+            base_df['sprint_speed'] = base_df['sprint_speed_spd'].fillna(base_df['sprint_speed'])
+            base_df = base_df.drop(columns=['sprint_speed_spd'])
 
-    # Merge sprint speed
-    if not speed_df.empty:
-        speed_cols = ['player_name', 'sprint_speed'] if 'player_name' in speed_df.columns else []
-        if speed_cols and 'sprint_speed' in speed_df.columns:
-            base_df = base_df.merge(speed_df[speed_cols], on='player_name', how='left')
-        else:
-            base_df['sprint_speed'] = np.nan
-    else:
-        base_df['sprint_speed'] = np.nan
+    # Merge arm data if not already in base
+    if base_df['arm_runs'].isna().all() and has_players(arm_df):
+        arm_keep = ['player_name'] + [c for c in ['arm_runs', 'pop_time', 'arm_strength'] if c in arm_df.columns]
+        if len(arm_keep) > 1:
+            arm_merge = arm_df[arm_keep].drop_duplicates('player_name')
+            base_df = base_df.merge(arm_merge, on='player_name', how='left', suffixes=('', '_arm'))
+            for c in ['arm_runs', 'pop_time']:
+                if f'{c}_arm' in base_df.columns:
+                    base_df[c] = base_df[f'{c}_arm'].fillna(base_df.get(c, np.nan))
+                    base_df = base_df.drop(columns=[f'{c}_arm'], errors='ignore')
 
-    # Merge arm data
-    if not arm_df.empty and 'player_name' in arm_df.columns:
-        arm_cols = [c for c in ['player_name', 'arm_runs', 'pop_time'] if c in arm_df.columns]
-        base_df = base_df.merge(arm_df[arm_cols], on='player_name', how='left')
-    else:
-        base_df['arm_runs'] = np.nan
+    # Merge framing (catchers)
+    if has_players(framing_df) and 'framing_runs' in framing_df.columns:
+        frm_merge = framing_df[['player_name', 'framing_runs']].drop_duplicates('player_name')
+        base_df = base_df.merge(frm_merge, on='player_name', how='left', suffixes=('', '_frm'))
+        if 'framing_runs_frm' in base_df.columns:
+            base_df['framing_runs'] = base_df['framing_runs_frm'].fillna(base_df['framing_runs'])
+            base_df = base_df.drop(columns=['framing_runs_frm'])
 
-    # Merge framing
-    if not framing_df.empty:
-        framing_merge_col = None
-        for c in ['player_name', 'last_name, first_name']:
-            if c in framing_df.columns:
-                framing_merge_col = c
-                break
-        if framing_merge_col and 'framing_runs' in framing_df.columns:
-            framing_sub = framing_df[[framing_merge_col, 'framing_runs']].rename(
-                columns={framing_merge_col: 'player_name'}
-            )
-            base_df = base_df.merge(framing_sub, on='player_name', how='left')
-        else:
-            base_df['framing_runs'] = np.nan
-    else:
-        base_df['framing_runs'] = np.nan
-
-    # Merge DRS
+    # Merge DRS (Baseball Reference / Sports Info Solutions)
     if not drs_df.empty:
-        drs_col = 'DRS' if 'DRS' in drs_df.columns else ('Rdrs' if 'Rdrs' in drs_df.columns else None)
-        if drs_col and 'Name' in drs_df.columns:
-            drs_sub = drs_df[['Name', drs_col]].rename(columns={'Name': 'player_name', drs_col: 'drs'})
-            drs_sub['player_name'] = drs_sub['player_name'].apply(standardize_player_name)
-            base_df['player_name_lower'] = base_df['player_name'].apply(standardize_player_name)
-            base_df = base_df.merge(drs_sub, left_on='player_name_lower', right_on='player_name', how='left', suffixes=('', '_drs'))
-            base_df = base_df.drop(columns=['player_name_lower', 'player_name_drs'], errors='ignore')
-        else:
-            base_df['drs'] = np.nan
-    else:
-        base_df['drs'] = np.nan
+        drs_col = next((c for c in ['DRS', 'Rdrs', 'rdrs'] if c in drs_df.columns), None)
+        name_col = next((c for c in ['Name', 'Player', 'player_name'] if c in drs_df.columns), None)
+        if drs_col and name_col:
+            drs_sub = drs_df[[name_col, drs_col]].rename(
+                columns={name_col: 'player_name', drs_col: 'drs'}
+            ).copy()
+            drs_sub['_key'] = drs_sub['player_name'].apply(standardize_player_name)
+            base_df['_key'] = base_df['player_name'].apply(standardize_player_name)
+            base_df = base_df.merge(
+                drs_sub[['_key', 'drs']], on='_key', how='left', suffixes=('', '_drs')
+            )
+            base_df = base_df.drop(columns=['_key', 'drs_drs'], errors='ignore')
 
     # Filter to minimum innings
     if 'innings' in base_df.columns:
@@ -1552,10 +1717,11 @@ def page_leaderboard(df: pd.DataFrame, status: dict, is_demo: bool):
     st.markdown('<div class="section-header">Leaderboard</div>', unsafe_allow_html=True)
 
     if is_demo:
-        st.markdown('''<div class="warn-box">
-        ⚠ DEMO MODE — Live data sources unavailable in this environment.
-        Displaying synthetic data for UI demonstration.
-        Deploy to Streamlit Community Cloud for live data.
+        demo_reason = status.get('demo_reason', 'Data sources returned no qualifying players.')
+        st.markdown(f'''<div class="warn-box">
+        ⚠ DEMO MODE — Live data sources returned no data. Displaying synthetic data.<br>
+        <span style="opacity:0.7;font-size:0.9em;">Reason: {demo_reason}</span><br>
+        <span style="opacity:0.7;font-size:0.9em;">Download the Diagnostics CSV below to see exactly what each source returned.</span>
         </div>''', unsafe_allow_html=True)
 
     # Filters
@@ -2686,6 +2852,41 @@ def main():
     if df.empty:
         st.error('Unable to load data. Please check your connection and try refreshing.')
         return
+
+    # Data source diagnostics in sidebar (after data loads)
+    with st.sidebar:
+        st.markdown('''
+        <div style="font-family:Bebas Neue;font-size:1.0rem;letter-spacing:0.1em;color:#4a5568;
+        padding:1rem 0 0.5rem;border-top:1px solid #1e2d42;margin-top:1rem;">
+        DATA SOURCES
+        </div>
+        ''', unsafe_allow_html=True)
+
+        source_info = [
+            ('OAA',     status.get('oaa',     {})),
+            ('FRV',     status.get('frv',     {})),
+            ('DRS',     status.get('drs',     {})),
+            ('Sprint',  status.get('sprint',  {})),
+            ('Arm',     status.get('arm',     {})),
+            ('Framing', status.get('framing', {})),
+        ]
+        for src_name, src_status in source_info:
+            rows = src_status.get('rows', 0)
+            ok = rows > 3
+            dot = '🟢' if ok else '🔴'
+            st.markdown(
+                f'''<div style="font-family:IBM Plex Mono;font-size:0.65rem;color:{'#00d084' if ok else '#ff4757'};">
+                {dot} {src_name}: {rows} rows</div>''',
+                unsafe_allow_html=True
+            )
+
+        mode = status.get('mode', 'demo')
+        base = status.get('base_source', 'none')
+        st.markdown(
+            f'''<div style="font-family:IBM Plex Mono;font-size:0.6rem;color:#4a5568;margin-top:0.5rem;">
+            Mode: {mode.upper()} | Base: {base}</div>''',
+            unsafe_allow_html=True
+        )
 
     # Route to page
     if page == 'Leaderboard':
