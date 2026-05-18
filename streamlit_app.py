@@ -38,26 +38,9 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# ── Keep-alive: Streamlit Cloud sleeps after ~30 min of inactivity ───────────
-# This scheduled rerun fires every 4 hours to prevent sleep
-# Also handled by GitHub Actions pinging the URL (see .github/workflows/)
-import threading as _threading
-import time as _time
-
-def _keep_alive_ping():
-    """Background thread: touch the session every 4 hours to prevent Streamlit Cloud sleep."""
-    while True:
-        _time.sleep(4 * 60 * 60)  # 4 hours
-        try:
-            st.cache_data.clear()  # forces a revalidation on next load
-        except Exception:
-            pass
-
-# Only start once per session
-if 'keepalive_started' not in st.session_state:
-    st.session_state['keepalive_started'] = True
-    t = _threading.Thread(target=_keep_alive_ping, daemon=True)
-    t.start()
+# ── Keep-alive: handled by GitHub Actions pinging the URL every 4 hours ──────
+# See .github/workflows/refresh_data.yml
+# No background thread needed — threads cause issues on Streamlit Cloud
 
 # ─────────────────────────────────────────────
 # STYLING
@@ -1362,36 +1345,30 @@ def calculate_disagreement_flag(df: pd.DataFrame) -> pd.DataFrame:
 # ─────────────────────────────────────────────
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def build_master_dataset(year: int) -> tuple[pd.DataFrame, dict]:
+def build_master_dataset(year: int):
     """
     Master pipeline: fetch all sources, calculate all metrics, return unified dataset.
     Returns (dataframe, status_dict)
     """
     status = {}
 
-    with st.spinner(f'Fetching OAA data for {year}...'):
-        oaa_df = fetch_savant_oaa(year)
-        status['oaa'] = get_data_status(oaa_df, 'Baseball Savant OAA')
+    oaa_df = fetch_savant_oaa(year)
+    status['oaa'] = get_data_status(oaa_df, 'Baseball Savant OAA')
 
-    with st.spinner(f'Fetching FRV data for {year}...'):
-        frv_df = fetch_savant_frv(year)
-        status['frv'] = get_data_status(frv_df, 'Baseball Savant FRV')
+    frv_df = fetch_savant_frv(year)
+    status['frv'] = get_data_status(frv_df, 'Baseball Savant FRV')
 
-    with st.spinner(f'Fetching sprint speed data for {year}...'):
-        speed_df = fetch_savant_sprint_speed(year)
-        status['sprint'] = get_data_status(speed_df, 'Baseball Savant Sprint Speed')
+    speed_df = fetch_savant_sprint_speed(year)
+    status['sprint'] = get_data_status(speed_df, 'Baseball Savant Sprint Speed')
 
-    with st.spinner(f'Fetching arm data for {year}...'):
-        arm_df = fetch_savant_arm(year)
-        status['arm'] = get_data_status(arm_df, 'Baseball Savant Arm')
+    arm_df = fetch_savant_arm(year)
+    status['arm'] = get_data_status(arm_df, 'Baseball Savant Arm')
 
-    with st.spinner(f'Fetching framing data for {year}...'):
-        framing_df = fetch_savant_framing(year)
-        status['framing'] = get_data_status(framing_df, 'Baseball Savant Framing')
+    framing_df = fetch_savant_framing(year)
+    status['framing'] = get_data_status(framing_df, 'Baseball Savant Framing')
 
-    with st.spinner(f'Fetching DRS data for {year}...'):
-        drs_df = fetch_br_drs(year)
-        status['drs'] = get_data_status(drs_df, 'Baseball Reference / SIS DRS')
+    drs_df = fetch_br_drs(year)
+    status['drs'] = get_data_status(drs_df, 'Baseball Reference / SIS DRS')
 
     # Standardize all dataframes — strip whitespace from columns, combine name fields
     def prep(df, source):
@@ -1473,14 +1450,20 @@ def build_master_dataset(year: int) -> tuple[pd.DataFrame, dict]:
         status['base_source'] = 'Savant FRV'
 
     else:
-        empty_df = build_demo_dataset(year)
+        try:
+            empty_df = build_demo_dataset(year)
+        except Exception:
+            empty_df = build_demo_dataset(2025)  # absolute fallback
         status['mode'] = 'demo'
+        oaa_rows = status.get('oaa', {}).get('rows', 0)
+        frv_rows = status.get('frv', {}).get('rows', 0)
+        oaa_cols = status.get('oaa_cols', [])[:5]
+        pname_oaa = 'YES' if has_players(oaa_df) else 'NO'
+        pname_frv = 'YES' if has_players(frv_df) else 'NO'
         status['demo_reason'] = (
-            f"OAA: {status['oaa']['rows']} rows, "
-            f"player_name={'YES' if has_players(oaa_df) else 'NO'} | "
-            f"FRV: {status['frv']['rows']} rows, "
-            f"player_name={'YES' if has_players(frv_df) else 'NO'} | "
-            f"OAA cols: {status['oaa_cols'][:5]}"
+            f"OAA: {oaa_rows} rows, player_name={pname_oaa} | "
+            f"FRV: {frv_rows} rows, player_name={pname_frv} | "
+            f"OAA cols: {oaa_cols}"
         )
         return empty_df, status
 
@@ -1507,7 +1490,7 @@ def build_master_dataset(year: int) -> tuple[pd.DataFrame, dict]:
         if 'position' in base_df.columns:
             weights = base_df['position'].map(pos_weights).fillna(0.65)
             base_df['frv'] = (base_df['oaa'] * weights).round(2)
-        status['frv_estimated'] = True
+    status['frv_estimated'] = True
 
     # Merge sprint speed if not already in base
     if base_df['sprint_speed'].isna().all() and has_players(speed_df) and 'sprint_speed' in speed_df.columns:
@@ -1564,7 +1547,7 @@ def build_master_dataset(year: int) -> tuple[pd.DataFrame, dict]:
             rate = pos_inn_rates.get(str(row.get('position','')), 3.0)
             return round(att * rate, 1)
         base_df['innings'] = base_df.apply(est_inn, axis=1)
-        status['innings_estimated'] = True
+    status['innings_estimated'] = True
 
     # Adaptive minimum: if median innings < 200, data is early-season — use 30 att as proxy
     median_inn = base_df['innings'].median() if len(base_df) > 0 else 0
@@ -3395,11 +3378,24 @@ def main():
     with st.spinner('Loading defensive data...'):
         df, status = build_master_dataset(year)
 
-    is_demo = status.get('mode', 'demo') == 'demo' or df.get('is_demo', pd.Series(False)).any() if not df.empty else True
+    # Determine demo mode safely
+    try:
+        is_demo = (
+            status.get('mode', 'demo') == 'demo' or
+            ('is_demo' in df.columns and bool(df['is_demo'].any()))
+        )
+    except Exception:
+        is_demo = True
 
-    if df.empty:
-        st.error('Unable to load data. Please check your connection and try refreshing.')
-        return
+    if df is None or (hasattr(df, 'empty') and df.empty):
+        # Last-resort fallback — should never reach here
+        try:
+            df = build_demo_dataset(year)
+            is_demo = True
+            status = {'mode': 'demo', 'demo_reason': 'Emergency fallback', 'last_updated': 'unknown'}
+        except Exception as e:
+            st.error(f'Unable to load data: {e}')
+            return
 
     # Data source diagnostics in sidebar (after data loads)
     with st.sidebar:
