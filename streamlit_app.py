@@ -654,20 +654,52 @@ def standardize_player_name(name: str) -> str:
 
 def combine_savant_name(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Savant CSVs export player names as two separate columns:
-    'last_name' and ' first_name' (note leading space in header).
-    Strip all column whitespace then combine into player_name.
+    Handle ALL Savant CSV name formats:
+
+    Format A (old/current): quoted combined column
+      Header: "last_name, first_name"   Value: "Carroll, Corbin"
+      pandas reads as single col named: 'last_name, first_name'
+
+    Format B (some endpoints): two separate columns
+      Headers: 'last_name'  ' first_name'  (note leading space)
+      After strip: 'last_name' + 'first_name'
+
+    Format C: already a 'player_name' column — do nothing.
     """
+    # Always strip whitespace from column names first
     df.columns = df.columns.str.strip()
+
+    if 'player_name' in df.columns:
+        # Format C — already done
+        return df
+
+    # Format A: single combined column "last_name, first_name"
+    combined = 'last_name, first_name'
+    if combined in df.columns:
+        def split_combined(val):
+            if pd.isna(val):
+                return val
+            val = str(val).strip()
+            if ',' in val:
+                parts = val.split(',', 1)
+                return f"{parts[1].strip()} {parts[0].strip()}"
+            return val
+        df['player_name'] = df[combined].apply(split_combined)
+        df = df.drop(columns=[combined], errors='ignore')
+        return df
+
+    # Format B: separate last_name + first_name (with or without leading space already stripped)
     if 'last_name' in df.columns and 'first_name' in df.columns:
         df['player_name'] = df['first_name'].str.strip() + ' ' + df['last_name'].str.strip()
         df = df.drop(columns=['last_name', 'first_name'], errors='ignore')
-    elif 'player_name' not in df.columns:
-        # Fallback: look for any name-like column
-        for c in df.columns:
-            if c.lower() in ['name', 'player']:
-                df['player_name'] = df[c]
-                break
+        return df
+
+    # Fallback: look for any recognizable name column
+    for c in df.columns:
+        if c.lower() in ['name', 'player', 'playername']:
+            df['player_name'] = df[c]
+            return df
+
     return df
 
 
@@ -691,18 +723,26 @@ def standardize_columns(df: pd.DataFrame, source: str) -> pd.DataFrame:
         'savant_oaa': {
             'outs_above_average': 'oaa',
             'fielding_run_value': 'frv',
-            'team_name_alt': 'team',
-            'team_name': 'team_long',
+            # Team column varies by Savant endpoint version
+            'team_name_alt':    'team',
+            'team_name_abbrev': 'team',
+            'team_abbreviation': 'team',
+            'display_team_name': 'team_long',
+            'team_name':        'team_long',
             'primary_pos_formatted': 'position',
-            'inn': 'innings',
+            'inn':      'innings',
             'attempts': 'oaa_attempts',
+            'n_att':    'oaa_attempts',
         },
         'savant_frv': {
             'fielding_run_value': 'frv',
-            'team_name_alt': 'team',
-            'team_name': 'team_long',
+            'team_name_alt':    'team',
+            'team_name_abbrev': 'team',
+            'team_abbreviation': 'team',
+            'display_team_name': 'team_long',
+            'team_name':        'team_long',
             'primary_pos_formatted': 'position',
-            'inn': 'innings',
+            'inn':      'innings',
             'attempts': 'oaa_attempts',
         },
         'savant_sprint': {
@@ -1273,11 +1313,12 @@ def build_master_dataset(year: int) -> tuple[pd.DataFrame, dict]:
         base_df = oaa_df.copy()
         # Canonical column mapping — the OAA endpoint has many columns
         for canonical, options in {
-            'team':         ['team', 'team_name_alt', 'team_name'],
+            # team: use abbreviation if available, fall back to full name
+            'team':         ['team', 'team_name_alt', 'team_name_abbrev', 'team_abbreviation', 'team_long', 'display_team_name', 'team_name'],
             'position':     ['position', 'primary_pos_formatted', 'pos'],
             'innings':      ['innings', 'inn'],
             'oaa':          ['oaa', 'outs_above_average'],
-            'oaa_attempts': ['oaa_attempts', 'attempts', 'n_attempts'],
+            'oaa_attempts': ['oaa_attempts', 'attempts', 'n_attempts', 'n_att'],
             'frv':          ['frv', 'fielding_run_value'],
             'arm_runs':     ['arm_runs'],
             'sprint_speed': ['sprint_speed'],
@@ -1419,37 +1460,38 @@ def build_demo_dataset(year: int) -> pd.DataFrame:
     """
     np.random.seed(42)
 
+    # Sprint speed in ft/sec (MLB average ~27 ft/sec; elite ~30+)
     players = [
-        ('Corbin Carroll', 'ARI', 'CF', 1200, 18, 15, 12, 8.5),
-        ('Mookie Betts', 'LAD', 'SS', 1100, 15, 13, 11, 8.2),
-        ('Matt Chapman', 'SF', '3B', 1050, 14, 12, 10, 8.0),
-        ('Brice Turang', 'MIL', '2B', 980, 13, 6, 22, 7.8),
-        ('Bobby Witt Jr.', 'KC', 'SS', 1150, 12, 3, 24, 8.4),
-        ('Nolan Arenado', 'STL', '3B', 1000, 10, 8, 8, 7.9),
-        ('Jose Trevino', 'NYY', 'C', 850, 9, 7, 5, 6.5),
-        ('Christian Walker', 'ARI', '1B', 1100, 8, 7, 6, 7.2),
-        ('Andres Gimenez', 'CLE', '2B', 990, 7, 9, 19, 7.1),
-        ('Kevin Kiermaier', 'TOR', 'CF', 920, 11, 9, 8, 7.5),
-        ('Yadier Molina', 'STL', 'C', 800, 6, 5, 4, 6.3),
-        ('Paul Goldschmidt', 'STL', '1B', 1050, 5, 4, 3, 7.0),
-        ('Freddie Freeman', 'LAD', '1B', 1100, 2, 1, 2, 6.8),
-        ('Francisco Lindor', 'NYM', 'SS', 1150, -2, -1, -5, 8.1),
-        ('Marcus Semien', 'TEX', '2B', 1000, 8, 10, 19, 7.8),
-        ('Ha-Seong Kim', 'SD', 'SS', 950, 9, 8, 12, 8.0),
-        ('Trea Turner', 'PHI', 'SS', 1050, -3, -2, -5, 8.3),
-        ('Austin Riley', 'ATL', '3B', 1080, -5, -4, -4, 7.7),
-        ('Rafael Devers', 'BOS', '3B', 1060, -4, -5, -2, 7.6),
-        ('Vladimir Guerrero Jr.', 'TOR', '1B', 1100, -4, -3, -5, 7.4),
-        ('Julio Rodriguez', 'SEA', 'CF', 1100, 14, 12, 10, 8.6),
-        ('Michael Harris II', 'ATL', 'CF', 1050, 16, 14, 12, 8.5),
-        ('Byron Buxton', 'MIN', 'CF', 800, 12, 10, 8, 8.7),
-        ('Steven Kwan', 'CLE', 'LF', 980, 10, 9, 7, 7.9),
-        ('Lars Nootbaar', 'STL', 'RF', 920, 8, 7, 6, 7.8),
-        ('Yordan Alvarez', 'HOU', 'LF', 900, -6, -5, -4, 7.1),
-        ('Adolis Garcia', 'TEX', 'RF', 980, 6, 5, 8, 7.7),
-        ('Kyle Tucker', 'HOU', 'RF', 1020, 7, 6, 9, 7.9),
-        ('Tommy Edman', 'LAD', '2B', 880, 8, 7, 11, 8.0),
-        ('Gavin Lux', 'LAD', '2B', 750, 2, 3, -4, 7.5),
+        ('Corbin Carroll', 'ARI', 'CF', 1200, 18, 15, 12, 30.1),
+        ('Mookie Betts', 'LAD', 'SS', 1100, 15, 13, 11, 28.2),
+        ('Matt Chapman', 'SF', '3B', 1050, 14, 12, 10, 27.5),
+        ('Brice Turang', 'MIL', '2B', 980, 13, 6, 22, 28.8),
+        ('Bobby Witt Jr.', 'KC', 'SS', 1150, 12, 3, 24, 30.4),
+        ('Nolan Arenado', 'STL', '3B', 1000, 10, 8, 8, 27.0),
+        ('Jose Trevino', 'NYY', 'C', 850, 9, 7, 5, 25.5),
+        ('Christian Walker', 'ARI', '1B', 1100, 8, 7, 6, 27.2),
+        ('Andres Gimenez', 'CLE', '2B', 990, 7, 9, 19, 28.1),
+        ('Kevin Kiermaier', 'TOR', 'CF', 920, 11, 9, 8, 29.5),
+        ('Yadier Molina', 'STL', 'C', 800, 6, 5, 4, 24.3),
+        ('Paul Goldschmidt', 'STL', '1B', 1050, 5, 4, 3, 27.0),
+        ('Freddie Freeman', 'LAD', '1B', 1100, 2, 1, 2, 26.8),
+        ('Francisco Lindor', 'NYM', 'SS', 1150, -2, -1, -5, 28.1),
+        ('Marcus Semien', 'TEX', '2B', 1000, 8, 10, 19, 27.8),
+        ('Ha-Seong Kim', 'SD', 'SS', 950, 9, 8, 12, 28.0),
+        ('Trea Turner', 'PHI', 'SS', 1050, -3, -2, -5, 29.3),
+        ('Austin Riley', 'ATL', '3B', 1080, -5, -4, -4, 26.7),
+        ('Rafael Devers', 'BOS', '3B', 1060, -4, -5, -2, 26.6),
+        ('Vladimir Guerrero Jr.', 'TOR', '1B', 1100, -4, -3, -5, 27.4),
+        ('Julio Rodriguez', 'SEA', 'CF', 1100, 14, 12, 10, 29.6),
+        ('Michael Harris II', 'ATL', 'CF', 1050, 16, 14, 12, 30.5),
+        ('Byron Buxton', 'MIN', 'CF', 800, 12, 10, 8, 30.7),
+        ('Steven Kwan', 'CLE', 'LF', 980, 10, 9, 7, 27.9),
+        ('Lars Nootbaar', 'STL', 'RF', 920, 8, 7, 6, 27.8),
+        ('Yordan Alvarez', 'HOU', 'LF', 900, -6, -5, -4, 27.1),
+        ('Adolis Garcia', 'TEX', 'RF', 980, 6, 5, 8, 28.7),
+        ('Kyle Tucker', 'HOU', 'RF', 1020, 7, 6, 9, 27.9),
+        ('Tommy Edman', 'LAD', '2B', 880, 8, 7, 11, 28.0),
+        ('Gavin Lux', 'LAD', '2B', 750, 2, 3, -4, 26.5),
     ]
 
     rows = []
@@ -2483,8 +2525,22 @@ def page_player_cards(df: pd.DataFrame, is_demo: bool):
     row = player_row.iloc[0]
 
     # Render the white-background card in the app
+    # Use st.components.v1.html to guarantee HTML renders (not displayed as raw text)
+    import streamlit.components.v1 as components
     card_html = render_player_card_html(row, selected_player)
-    st.markdown(card_html, unsafe_allow_html=True)
+    # Wrap in a full HTML document for components.html
+    full_html = f'''<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  body {{ margin: 0; padding: 8px; background: transparent; }}
+</style>
+</head>
+<body>{card_html}</body>
+</html>'''
+    components.html(full_html, height=620, scrolling=False)
 
     # ── Download section ─────────────────────────────────────────────────────
     st.markdown('<br>', unsafe_allow_html=True)
