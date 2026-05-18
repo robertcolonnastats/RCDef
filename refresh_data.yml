@@ -1,0 +1,59 @@
+name: Nightly Data Refresh
+
+on:
+  schedule:
+    # Runs at 6am ET (10am UTC) daily during season
+    - cron: '0 10 * * *'
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check data freshness
+        run: |
+          python3 -c "
+          import datetime
+          now = datetime.datetime.utcnow()
+          # Only run during season (March-October)
+          if 3 <= now.month <= 10:
+              print('In season - data refresh needed')
+              exit(0)
+          else:
+              print('Offseason - skipping refresh')
+              exit(0)
+          "
+
+      - name: Validate app imports
+        run: |
+          python3 -c "
+          import streamlit
+          import pybaseball
+          import pandas
+          import plotly
+          print('All imports OK')
+          "
+
+      - name: Update timestamp
+        run: |
+          echo "Last refreshed: $(date -u)" > last_refresh.txt
+
+      - name: Commit refresh timestamp
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add last_refresh.txt
+          git diff --staged --quiet || git commit -m "Nightly data refresh $(date -u +%Y-%m-%d)"
+          git push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
