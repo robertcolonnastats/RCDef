@@ -1700,10 +1700,10 @@ def page_leaderboard(df: pd.DataFrame, status: dict, is_demo: bool):
                 lambda x: fmt.format(float(x)) if pd.notna(x) else '-'
             )
 
-    # Add disagreement flag column
+    # Add disagreement flag as FIRST column
     if 'disagreement_flag' in filtered.columns:
         display_df.insert(
-            display_df.columns.get_loc('RCDef') + 1,
+            0,
             '⚡',
             filtered['disagreement_flag'].apply(lambda x: '⚡' if x else '')
         )
@@ -1726,6 +1726,44 @@ def page_leaderboard(df: pd.DataFrame, status: dict, is_demo: bool):
     *DRS data courtesy of Sports Info Solutions / Baseball Reference. Non-commercial attribution.
     ⚡ = Metric disagreement flag (top metrics diverge >8 runs). Minimum 300 innings for full season display.
     </div>''', unsafe_allow_html=True)
+
+    # ── Downloads ────────────────────────────────────────────────────────────
+    dl_col1, dl_col2, dl_col3 = st.columns([2, 2, 6])
+
+    with dl_col1:
+        # Leaderboard CSV
+        csv_export = filtered.copy()
+        # Clean up internal columns before export
+        drop_internal = ['is_demo', 'player_name_lower', 'disagreement_detail', 'sample_size']
+        csv_export = csv_export.drop(columns=[c for c in drop_internal if c in csv_export.columns])
+        csv_bytes = csv_export.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label='⬇ Download Leaderboard (.csv)',
+            data=csv_bytes,
+            file_name=f'rcdef_leaderboard_{year_filter}.csv',
+            mime='text/csv',
+            use_container_width=True,
+        )
+
+    with dl_col2:
+        # Diagnostics download — all raw data columns
+        diag_df = df.copy()
+        diag_df['_pull_timestamp'] = status.get('last_updated', 'unknown')
+        diag_df['_data_mode'] = status.get('mode', 'unknown')
+        diag_df['_oaa_source_rows'] = status.get('oaa', {}).get('rows', 0)
+        diag_df['_frv_source_rows'] = status.get('frv', {}).get('rows', 0)
+        diag_df['_drs_source_rows'] = status.get('drs', {}).get('rows', 0)
+        diag_df['_sprint_source_rows'] = status.get('sprint', {}).get('rows', 0)
+        diag_df['_arm_source_rows'] = status.get('arm', {}).get('rows', 0)
+        diag_df['_framing_source_rows'] = status.get('framing', {}).get('rows', 0)
+        diag_bytes = diag_df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label='⬇ Download Diagnostics (.csv)',
+            data=diag_bytes,
+            file_name=f'rcdef_diagnostics_{year_filter}.csv',
+            mime='text/csv',
+            use_container_width=True,
+        )
 
     # Visualization tabs
     st.markdown('<br>', unsafe_allow_html=True)
@@ -1825,6 +1863,183 @@ def page_leaderboard(df: pd.DataFrame, status: dict, is_demo: bool):
             st.plotly_chart(fig, use_container_width=True)
 
 
+
+def build_player_card_jpg(row: pd.Series, player_name: str) -> bytes | None:
+    """
+    Generate a white-background JPG player card using Pillow.
+    Returns raw JPEG bytes or None on failure.
+    Layout: white card, dark text, colored stat pills, component bar chart.
+    """
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+        import io as _io
+        import os
+
+        # ── Canvas ───────────────────────────────────────────────────────────
+        W, H = 900, 480
+        img = Image.new('RGB', (W, H), color=(255, 255, 255))
+        draw = ImageDraw.Draw(img)
+
+        # ── Colors ───────────────────────────────────────────────────────────
+        C_BG       = (255, 255, 255)
+        C_HEADER   = (10,  14,  26)   # near-black header bar
+        C_ACCENT   = (0,   175, 108)  # green
+        C_RED      = (220, 60,  70)
+        C_BLUE     = (52,  130, 200)
+        C_GRAY     = (130, 140, 160)
+        C_LGRAY    = (235, 238, 242)
+        C_TEXT     = (20,  30,  50)
+        C_SUBTEXT  = (90,  100, 120)
+
+        # ── Fonts — use default PIL font (no external fonts needed) ──────────
+        try:
+            fnt_big   = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 36)
+            fnt_med   = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 18)
+            fnt_sm    = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', 14)
+            fnt_xs    = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', 11)
+            fnt_mono  = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf', 13)
+        except Exception:
+            fnt_big = fnt_med = fnt_sm = fnt_xs = fnt_mono = ImageFont.load_default()
+
+        # ── Header bar ───────────────────────────────────────────────────────
+        draw.rectangle([(0, 0), (W, 90)], fill=C_HEADER)
+
+        # Logo text
+        draw.text((24, 12), 'RCDef', font=fnt_big, fill=C_ACCENT)
+
+        # Player name
+        pos  = str(row.get('position', '?'))
+        team = str(row.get('team', '?'))
+        year = str(row.get('data_year', '2025'))
+        draw.text((24, 52), player_name.upper(), font=fnt_med, fill=(230, 234, 240))
+        meta = f'{team}  ·  {POSITIONS.get(pos, pos)}  ·  {row.get("innings", 0):.0f} inn  ·  {year} Season'
+        draw.text((24, 74), meta, font=fnt_xs, fill=C_GRAY)
+
+        # RCDef badge (top right)
+        rcdef = row.get('rcdef', None)
+        rcdef_str = format_stat(rcdef)
+        rcdef_col = C_ACCENT if (rcdef is not None and not (isinstance(rcdef, float) and np.isnan(rcdef)) and float(rcdef) >= 0) else C_RED
+        draw.text((W - 220, 14), 'RCDef', font=fnt_xs, fill=C_GRAY)
+        draw.text((W - 220, 30), rcdef_str, font=fnt_med, fill=rcdef_col)
+        rcdef_plus = row.get('rcdef_plus', None)
+        rcp_str = f'{float(rcdef_plus):.0f}th percentile' if (rcdef_plus is not None and not (isinstance(rcdef_plus, float) and np.isnan(rcdef_plus))) else ''
+        draw.text((W - 220, 56), rcp_str, font=fnt_xs, fill=C_GRAY)
+
+        # Reliability badge
+        rel = str(row.get('reliability', 'Low'))
+        rel_col = C_ACCENT if rel == 'High' else ((255, 200, 30) if rel == 'Medium' else C_RED)
+        draw.rectangle([(W - 90, 10), (W - 14, 32)], fill=rel_col, outline=None)
+        draw.text((W - 85, 14), rel.upper(), font=fnt_xs, fill=C_HEADER)
+
+        # Disagreement flag
+        if row.get('disagreement_flag', False):
+            draw.rectangle([(W - 90, 38), (W - 14, 60)], fill=(255, 200, 30), outline=None)
+            draw.text((W - 85, 42), '⚡ FLAG', font=fnt_xs, fill=C_HEADER)
+
+        # ── Divider ──────────────────────────────────────────────────────────
+        draw.rectangle([(0, 90), (W, 94)], fill=C_ACCENT)
+
+        # ── Input metrics row ────────────────────────────────────────────────
+        y_row1 = 108
+        input_metrics = [
+            ('OAA', row.get('oaa')),
+            ('FRV', row.get('frv')),
+            ('DRS*', row.get('drs')),
+            ('Spd', row.get('sprint_speed')),
+            ('ARM', row.get('arm_runs')),
+            ('FRM', row.get('framing_runs')),
+        ]
+        cell_w = W // len(input_metrics)
+        for i, (lbl, val) in enumerate(input_metrics):
+            x = i * cell_w + 12
+            draw.text((x, y_row1), lbl, font=fnt_xs, fill=C_SUBTEXT)
+            if val is None or (isinstance(val, float) and np.isnan(val)):
+                draw.text((x, y_row1 + 16), '—', font=fnt_med, fill=C_LGRAY)
+            else:
+                v = float(val)
+                col = C_ACCENT if v > 0 else (C_RED if v < 0 else C_GRAY)
+                sign = '+' if v > 0 else ''
+                draw.text((x, y_row1 + 16), f'{sign}{v:.1f}', font=fnt_med, fill=col)
+
+        # Light separator
+        draw.rectangle([(20, 158), (W - 20, 160)], fill=C_LGRAY)
+
+        # ── Component bars ───────────────────────────────────────────────────
+        components = [
+            ('Conv. Runs',   'conversion_runs'),
+            ('Att. Range',   'attempt_range_score'),
+            ('RRAA',         'rraa'),
+            ('BAP',          'bap'),
+            ('Arm Runs',     'arm_runs'),
+            ('Stadium Adj.', 'stadium_correction'),
+        ]
+
+        y_comp_start = 168
+        bar_h = 22
+        bar_gap = 46
+        label_w = 110
+        bar_max_w = W - label_w - 100  # space for bar + value label
+        bar_origin = label_w + 20
+
+        # Find max abs value for scaling
+        comp_vals = []
+        for lbl, col in components:
+            v = row.get(col, None)
+            if v is not None and not (isinstance(v, float) and np.isnan(v)):
+                comp_vals.append(abs(float(v)))
+        max_abs = max(comp_vals) if comp_vals else 10
+        max_abs = max(max_abs, 5)
+
+        for i, (lbl, col) in enumerate(components):
+            y = y_comp_start + i * bar_gap
+            val = row.get(col, None)
+
+            # Label
+            draw.text((20, y + 4), lbl, font=fnt_xs, fill=C_SUBTEXT)
+
+            if val is None or (isinstance(val, float) and np.isnan(val)):
+                # N/A row
+                draw.rectangle([(bar_origin, y + 2), (bar_origin + bar_max_w, y + bar_h)],
+                                fill=C_LGRAY, outline=None)
+                draw.text((bar_origin + 8, y + 5), 'N/A', font=fnt_xs, fill=C_GRAY)
+            else:
+                v = float(val)
+                bar_len = int(abs(v) / max_abs * bar_max_w * 0.9)
+                bar_len = max(bar_len, 2)
+                bar_col = C_ACCENT if v >= 0 else C_RED
+
+                # Background track
+                draw.rectangle([(bar_origin, y + 2), (bar_origin + bar_max_w, y + bar_h)],
+                                fill=C_LGRAY, outline=None)
+                # Value bar
+                draw.rectangle([(bar_origin, y + 2), (bar_origin + bar_len, y + bar_h)],
+                                fill=bar_col, outline=None)
+                # Value text
+                sign = '+' if v > 0 else ''
+                draw.text((bar_origin + bar_max_w + 8, y + 5), f'{sign}{v:.1f}', font=fnt_mono, fill=bar_col)
+
+        # ── Context label ────────────────────────────────────────────────────
+        context = get_rcdef_context(rcdef)
+        draw.text((bar_origin, y_comp_start - 18), context, font=fnt_xs, fill=C_SUBTEXT)
+
+        # ── Footer ───────────────────────────────────────────────────────────
+        draw.rectangle([(0, H - 30), (W, H)], fill=C_LGRAY)
+        footer_txt = (
+            'RCDef Composite Defensive Analytics  ·  rcdef.streamlit.app  ·  '
+            '*DRS © Sports Info Solutions / Baseball Reference  ·  Non-commercial'
+        )
+        draw.text((20, H - 20), footer_txt, font=fnt_xs, fill=C_SUBTEXT)
+
+        # ── Export ───────────────────────────────────────────────────────────
+        buf = _io.BytesIO()
+        img.save(buf, format='JPEG', quality=92, optimize=True)
+        buf.seek(0)
+        return buf.getvalue()
+
+    except Exception as e:
+        return None
+
+
 # ─────────────────────────────────────────────
 # PAGE: PLAYER CARDS
 # ─────────────────────────────────────────────
@@ -1911,23 +2126,26 @@ def page_player_cards(df: pd.DataFrame, is_demo: bool):
             na_reason = ''
             if is_na:
                 if col == 'rraa' and pos != '1B':
-                    na_reason = 'Not applicable (1B only)'
+                    na_reason = 'Not applicable — 1B only'
                 elif col == 'framing_runs' and pos != 'C':
-                    na_reason = 'Not applicable (C only)'
+                    na_reason = 'Not applicable — C only'
                 else:
                     na_reason = 'Insufficient data'
+
+            # Build right-side HTML in Python to avoid f-string rendering issues
+            if is_na:
+                right_html = f'<span style="font-family:IBM Plex Mono;font-size:0.72rem;color:#4a5568;">{na_reason}</span>'
+            else:
+                right_html = f'<span class="stat-pill {pill_class}" style="font-size:1rem;padding:0.3rem 0.8rem;">{val_str}</span>'
 
             st.markdown(f'''
             <div class="metric-card" style="padding:0.8rem 1.2rem;margin-bottom:0.5rem;">
                 <div style="display:flex;justify-content:space-between;align-items:center;">
-                    <div>
+                    <div style="flex:1;min-width:0;">
                         <div class="metric-label" style="margin-bottom:0.2rem;">{label}</div>
-                        <div style="font-family:IBM Plex Mono;font-size:0.65rem;color:#4a5568;">{tooltip[:80]}...</div>
+                        <div style="font-family:IBM Plex Mono;font-size:0.65rem;color:#4a5568;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{tooltip[:80]}...</div>
                     </div>
-                    <div>
-                        {"" if is_na else f'<span class="stat-pill {pill_class}" style="font-size:1rem;padding:0.3rem 0.8rem;">{val_str}</span>'}
-                        {"" if not is_na else f'<span style="font-family:IBM Plex Mono;font-size:0.7rem;color:#4a5568;">— {na_reason}</span>'}
-                    </div>
+                    <div style="flex-shrink:0;margin-left:1rem;">{right_html}</div>
                 </div>
             </div>
             ''', unsafe_allow_html=True)
@@ -1989,6 +2207,25 @@ def page_player_cards(df: pd.DataFrame, is_demo: bool):
             st.markdown('''<div style="font-family:IBM Plex Mono;font-size:0.65rem;color:#4a5568;padding:0.5rem 0;">
             No neighbor adjustment applied for this player.
             </div>''', unsafe_allow_html=True)
+
+    # ── JPG Player Card Download ─────────────────────────────────────────────
+    st.markdown('<br>', unsafe_allow_html=True)
+    st.markdown('<div style="font-family:Bebas Neue;font-size:1.2rem;letter-spacing:0.1em;color:#8892a4;">DOWNLOAD PLAYER CARD</div>', unsafe_allow_html=True)
+
+    if st.button('Generate Player Card JPG', use_container_width=False, key='gen_jpg'):
+        jpg_bytes = build_player_card_jpg(row, selected_player)
+        if jpg_bytes:
+            safe_name = selected_player.replace(' ', '_').replace('.', '').replace("'", '')
+            st.download_button(
+                label=f'⬇ Download {selected_player} Card (.jpg)',
+                data=jpg_bytes,
+                file_name=f'rcdef_{safe_name}_{row.get("data_year","2025")}.jpg',
+                mime='image/jpeg',
+                use_container_width=False,
+                key='dl_jpg',
+            )
+        else:
+            st.error('Card generation failed. Check that Pillow is installed.')
 
 
 # ─────────────────────────────────────────────
