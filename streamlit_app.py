@@ -337,55 +337,102 @@ STADIUM_CORRECTIONS = {
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_savant_oaa(year: int, position: str = 'all') -> pd.DataFrame:
     """
-    Pull Outs Above Average via pybaseball (statcast_fielding).
-    Falls back to direct HTTP request if pybaseball fails.
-    Savant CSV columns: last_name, ' first_name' (leading space), player_id,
-    team_name_alt, primary_pos_formatted, attempts, outs_above_average, inn.
+    Pull Outs Above Average from Baseball Savant.
+    Uses statcast_outs_above_average from pybaseball for each position group,
+    then falls back to direct HTTP. Returns empty DataFrame with debug info on failure.
     """
-    # pybaseball path — handles session/cookie management automatically
+    SAVANT_HEADERS = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Referer': 'https://baseballsavant.mlb.com/leaderboard/outs_above_average',
+    }
+
+    # pybaseball path — statcast_outs_above_average is the correct function
+    # It does not support pos='all'; pull infield + outfield separately and combine
     try:
-        from pybaseball import statcast_fielding
-        # pos='all' not supported; pull each position group separately
-        pos_codes = {'all': 'all'}
+        from pybaseball import statcast_outs_above_average
+        pos_groups = ['all', 4, 5, 6, 7, 8, 9, 3]  # all, 2B, 3B, SS, LF, CF, RF, 1B
         dfs = []
-        for label, code in pos_codes.items():
+        # Try 'all' first
+        for pos_code in pos_groups[:1]:
             try:
-                df = statcast_fielding(year, pos=code, min_att=1)
+                df = statcast_outs_above_average(year, pos=pos_code, min_att=1)
                 if df is not None and not df.empty and 'Host not in allowlist' not in str(df.columns):
                     dfs.append(df)
                     break
             except Exception:
                 pass
+        # If all worked, skip position-by-position
+        if not dfs:
+            for pos_code in pos_groups[1:]:
+                try:
+                    df = statcast_outs_above_average(year, pos=pos_code, min_att=1)
+                    if df is not None and not df.empty and 'Host not in allowlist' not in str(df.columns):
+                        dfs.append(df)
+                except Exception:
+                    pass
         if dfs:
             result = pd.concat(dfs, ignore_index=True)
+            # Drop duplicates (player may appear in multiple position pulls)
+            if 'player_id' in result.columns:
+                result = result.drop_duplicates(subset=['player_id'], keep='first')
             result['data_year'] = year
             result['data_source'] = 'savant_oaa'
             return result
     except Exception:
         pass
 
-    # Direct HTTP fallback with browser-like headers
-    try:
-        url = (
-            f"https://baseballsavant.mlb.com/leaderboard/outs_above_average"
-            f"?type=Fielder&year={year}&team=&range=year&min=1&pos=all&roles=&viz=show&csv=true"
-        )
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Referer': 'https://baseballsavant.mlb.com/',
-        }
-        r = requests.get(url, headers=headers, timeout=20)
-        if r.status_code == 200 and len(r.text) > 200 and 'last_name' in r.text:
-            df = pd.read_csv(io.StringIO(r.text))
-            df['data_year'] = year
-            df['data_source'] = 'savant_oaa'
-            return df
-    except Exception:
-        pass
+    # Direct HTTP fallback — try multiple URL patterns
+    url_attempts = [
+        f"https://baseballsavant.mlb.com/leaderboard/outs_above_average?type=Fielder&year={year}&team=&range=year&min=1&pos=all&roles=&viz=show&csv=true",
+        f"https://baseballsavant.mlb.com/leaderboard/outs_above_average?type=Fielder&year={year}&team=&range=year&min=q&pos=all&roles=&viz=show&csv=true",
+    ]
+    for url in url_attempts:
+        try:
+            session = requests.Session()
+            # First hit the page to get cookies
+            session.get('https://baseballsavant.mlb.com', headers=SAVANT_HEADERS, timeout=10)
+            r = session.get(url, headers=SAVANT_HEADERS, timeout=25)
+            if r.status_code == 200 and len(r.text) > 300:
+                # Check it's actually CSV not HTML
+                first_line = r.text.split('\n')[0]
+                if 'last_name' in first_line or 'player_id' in first_line:
+                    df = pd.read_csv(io.StringIO(r.text))
+                    df['data_year'] = year
+                    df['data_source'] = 'savant_oaa'
+                    df['_http_status'] = r.status_code
+                    return df
+        except Exception:
+            pass
 
-    return pd.DataFrame()
+    # Return empty df with debug metadata
+    debug = pd.DataFrame({'_debug_note': [f'All fetch attempts failed for year={year}']})
+    return debug
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def test_savant_connection() -> dict:
+    """
+    Test connectivity to Baseball Savant. Called on load to diagnose demo mode.
+    Returns dict with status info for each endpoint.
+    """
+    results = {}
+    test_url = "https://baseballsavant.mlb.com/leaderboard/outs_above_average?type=Fielder&year=2025&team=&range=year&min=1&pos=all&roles=&viz=show&csv=true"
+    try:
+        r = requests.get(test_url, headers={
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }, timeout=15)
+        results['savant_status'] = r.status_code
+        results['savant_bytes'] = len(r.text)
+        results['savant_first_50'] = r.text[:50].replace('\n', ' ')
+        results['is_csv'] = 'last_name' in r.text[:200] or 'player_id' in r.text[:200]
+    except Exception as e:
+        results['savant_error'] = str(e)
+        results['savant_status'] = 0
+    return results
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -1084,32 +1131,66 @@ def calculate_reliability(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def oaa_to_runs(oaa_series: pd.Series, position_series: pd.Series) -> pd.Series:
+    """
+    Convert OAA (outs) to runs using position-specific weights.
+    OAA is measured in outs above average; DRS and FRV are in runs.
+    Must convert to the same currency before comparing.
+    """
+    weights = {
+        'C': 0.65, '1B': 0.65, '2B': 0.73, '3B': 0.72,
+        'SS': 0.74, 'LF': 0.57, 'CF': 0.56, 'RF': 0.57
+    }
+    if position_series is not None and len(position_series) == len(oaa_series):
+        w = position_series.map(weights).fillna(0.65)
+    else:
+        w = pd.Series(0.65, index=oaa_series.index)
+    return oaa_series * w
+
+
 def calculate_disagreement_flag(df: pd.DataFrame) -> pd.DataFrame:
     """
     Flag players where top two input metrics diverge > DISAGREEMENT_THRESHOLD runs.
+    All metrics converted to runs before comparison:
+    - OAA (outs) → runs via position-specific weight
+    - FRV already in runs
+    - DRS already in runs
     """
     df['disagreement_flag'] = False
     df['disagreement_detail'] = ''
 
-    metric_pairs = [
-        ('oaa', 'frv', 'OAA vs FRV'),
-        ('oaa', 'drs', 'OAA vs DRS'),
-        ('frv', 'drs', 'FRV vs DRS'),
-    ]
+    pos_series = df.get('position', None)
 
-    for m1, m2, label in metric_pairs:
-        if m1 in df.columns and m2 in df.columns:
-            # Convert OAA to runs for comparison
-            m1_vals = df[m1]
-            m2_vals = df[m2]
+    # Build runs-equivalent versions of each metric
+    metrics_in_runs = {}
+    if 'oaa' in df.columns:
+        metrics_in_runs['OAA'] = oaa_to_runs(df['oaa'].fillna(0), pos_series)
+    if 'frv' in df.columns:
+        metrics_in_runs['FRV'] = df['frv'].fillna(0)
+    if 'drs' in df.columns:
+        metrics_in_runs['DRS'] = pd.to_numeric(df['drs'], errors='coerce').fillna(0)
 
-            if m1 == 'oaa':
-                m1_vals = m1_vals * 0.65  # approximate conversion
+    # Compare every pair
+    metric_names = list(metrics_in_runs.keys())
+    for i in range(len(metric_names)):
+        for j in range(i + 1, len(metric_names)):
+            m1_name = metric_names[i]
+            m2_name = metric_names[j]
+            m1_vals = metrics_in_runs[m1_name]
+            m2_vals = metrics_in_runs[m2_name]
+
+            # Only compare where both metrics are actually available (non-zero/non-null in original)
+            m1_orig = df.get(m1_name.lower(), pd.Series(dtype=float))
+            m2_orig = df.get(m2_name.lower(), pd.Series(dtype=float))
+            both_valid = m1_orig.notna() & m2_orig.notna()
 
             diff = (m1_vals - m2_vals).abs()
-            flagged = diff > DISAGREEMENT_THRESHOLD
+            flagged = (diff > DISAGREEMENT_THRESHOLD) & both_valid
             df.loc[flagged, 'disagreement_flag'] = True
-            df.loc[flagged, 'disagreement_detail'] += label + ' '
+            # Add clean detail string with the actual run difference
+            for idx in df.index[flagged]:
+                d = round(float(diff.loc[idx]), 1)
+                df.loc[idx, 'disagreement_detail'] += f'{m1_name} vs {m2_name} ({d} run gap) | '
 
     return df
 
@@ -2032,183 +2113,354 @@ def page_leaderboard(df: pd.DataFrame, status: dict, is_demo: bool):
 
 def build_player_card_jpg(row: pd.Series, player_name: str) -> bytes | None:
     """
-    Generate a white-background JPG player card using Pillow.
-    Returns raw JPEG bytes or None on failure.
-    Layout: white card, dark text, colored stat pills, component bar chart.
+    Generate a JPG player card that exactly mirrors render_player_card_html.
+    White background, dark header, input metrics row, component bars.
     """
     try:
         from PIL import Image, ImageDraw, ImageFont
         import io as _io
-        import os
 
-        # ── Canvas ───────────────────────────────────────────────────────────
-        W, H = 900, 480
+        W, H = 900, 415
         img = Image.new('RGB', (W, H), color=(255, 255, 255))
         draw = ImageDraw.Draw(img)
 
-        # ── Colors ───────────────────────────────────────────────────────────
-        C_BG       = (255, 255, 255)
-        C_HEADER   = (10,  14,  26)   # near-black header bar
-        C_ACCENT   = (0,   175, 108)  # green
-        C_RED      = (220, 60,  70)
-        C_BLUE     = (52,  130, 200)
-        C_GRAY     = (130, 140, 160)
-        C_LGRAY    = (235, 238, 242)
-        C_TEXT     = (20,  30,  50)
-        C_SUBTEXT  = (90,  100, 120)
+        # ── Colors (match HTML) ───────────────────────────────────────────────
+        C_HEADER  = (10,  14,  26)
+        C_ACCENT  = (0,  208, 132)
+        C_RED     = (255, 71,  87)
+        C_GRAY    = (107, 114, 128)
+        C_LGRAY   = (243, 244, 246)
+        C_MGRAY   = (229, 231, 235)
+        C_TEXT    = (55,  65,  81)
+        C_SUBTEXT = (156, 163, 175)
+        C_WHITE   = (255, 255, 255)
 
-        # ── Fonts — use default PIL font (no external fonts needed) ──────────
-        try:
-            fnt_big   = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 36)
-            fnt_med   = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 18)
-            fnt_sm    = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', 14)
-            fnt_xs    = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', 11)
-            fnt_mono  = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf', 13)
-        except Exception:
-            fnt_big = fnt_med = fnt_sm = fnt_xs = fnt_mono = ImageFont.load_default()
+        # ── Fonts ─────────────────────────────────────────────────────────────
+        font_paths = [
+            '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
+            '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf',
+        ]
+        mono_paths = [
+            '/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf',
+            '/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf',
+        ]
+        def load_font(paths, size):
+            for p in paths:
+                try:
+                    return ImageFont.truetype(p, size)
+                except Exception:
+                    pass
+            return ImageFont.load_default()
 
-        # ── Header bar ───────────────────────────────────────────────────────
-        draw.rectangle([(0, 0), (W, 90)], fill=C_HEADER)
+        fnt_logo   = load_font(font_paths, 28)
+        fnt_name   = load_font(font_paths, 22)
+        fnt_med    = load_font(font_paths, 16)
+        fnt_sm     = load_font(font_paths, 13)
+        fnt_xs     = load_font(font_paths, 11)
+        fnt_mono   = load_font(mono_paths, 11)
+        fnt_rcdef  = load_font(font_paths, 30)
 
-        # Logo text
-        draw.text((24, 12), 'RCDef', font=fnt_big, fill=C_ACCENT)
-
-        # Player name
-        pos  = str(row.get('position', '?'))
-        team = str(row.get('team', '?'))
-        year = str(row.get('data_year', '2025'))
-        draw.text((24, 52), player_name.upper(), font=fnt_med, fill=(230, 234, 240))
-        meta = f'{team}  ·  {POSITIONS.get(pos, pos)}  ·  {row.get("innings", 0):.0f} inn  ·  {year} Season'
-        draw.text((24, 74), meta, font=fnt_xs, fill=C_GRAY)
-
-        # RCDef badge (top right)
-        rcdef = row.get('rcdef', None)
-        rcdef_str = format_stat(rcdef)
-        rcdef_col = C_ACCENT if (rcdef is not None and not (isinstance(rcdef, float) and np.isnan(rcdef)) and float(rcdef) >= 0) else C_RED
-        draw.text((W - 220, 14), 'RCDef', font=fnt_xs, fill=C_GRAY)
-        draw.text((W - 220, 30), rcdef_str, font=fnt_med, fill=rcdef_col)
+        # ── Pull values ───────────────────────────────────────────────────────
+        pos        = str(row.get('position', '?'))
+        team       = str(row.get('team', '?'))
+        inn        = float(row.get('innings', 0) or 0)
+        year       = str(row.get('data_year', ''))
+        rcdef      = row.get('rcdef', None)
         rcdef_plus = row.get('rcdef_plus', None)
-        rcp_str = f'{float(rcdef_plus):.0f}th percentile' if (rcdef_plus is not None and not (isinstance(rcdef_plus, float) and np.isnan(rcdef_plus))) else ''
-        draw.text((W - 220, 56), rcp_str, font=fnt_xs, fill=C_GRAY)
+        reliability= str(row.get('reliability', 'Low'))
+        disagree   = bool(row.get('disagreement_flag', False))
+        context    = get_rcdef_context(rcdef)
+        rcdef_str  = format_stat(rcdef)
+        rcdef_col  = C_ACCENT if (rcdef is not None and not (isinstance(rcdef, float) and np.isnan(rcdef)) and float(rcdef) >= 0) else C_RED
+        rel_col    = {'High': C_ACCENT, 'Medium': (255, 211, 42)}.get(reliability, C_RED)
+        rcp_str    = f'{float(rcdef_plus):.0f}th pct' if (rcdef_plus is not None and not (isinstance(rcdef_plus, float) and np.isnan(rcdef_plus))) else ''
+
+        # ── HEADER (dark) ─────────────────────────────────────────────────────
+        HEADER_H = 105
+        draw.rectangle([(0, 0), (W, HEADER_H)], fill=C_HEADER)
+
+        # Logo
+        draw.text((22, 10), 'RCDef', font=fnt_logo, fill=C_ACCENT)
+        # Player name
+        draw.text((22, 42), player_name.upper(), font=fnt_name, fill=(249, 250, 251))
+        # Meta
+        pos_label = POSITIONS.get(pos, pos)
+        draw.text((22, 68), f'{team}  ·  {pos_label}  ·  {inn:.0f} inn  ·  {year} Season', font=fnt_mono, fill=C_GRAY)
+        # Context
+        draw.text((22, 88), context, font=fnt_mono, fill=(156, 163, 175))
+
+        # RCDef value (top right)
+        draw.text((W - 200, 12), 'RCDef', font=fnt_xs, fill=C_GRAY)
+        draw.text((W - 200, 26), rcdef_str, font=fnt_rcdef, fill=rcdef_col)
+        draw.text((W - 200, 62), rcp_str, font=fnt_mono, fill=C_GRAY)
 
         # Reliability badge
-        rel = str(row.get('reliability', 'Low'))
-        rel_col = C_ACCENT if rel == 'High' else ((255, 200, 30) if rel == 'Medium' else C_RED)
-        draw.rectangle([(W - 90, 10), (W - 14, 32)], fill=rel_col, outline=None)
-        draw.text((W - 85, 14), rel.upper(), font=fnt_xs, fill=C_HEADER)
+        rel_text = reliability.upper()
+        draw.rectangle([(W - 90, 10), (W - 10, 28)], fill=rel_col)
+        draw.text((W - 87, 13), rel_text, font=fnt_xs, fill=C_HEADER)
 
-        # Disagreement flag
-        if row.get('disagreement_flag', False):
-            draw.rectangle([(W - 90, 38), (W - 14, 60)], fill=(255, 200, 30), outline=None)
-            draw.text((W - 85, 42), '⚡ FLAG', font=fnt_xs, fill=C_HEADER)
+        # Disagree badge
+        if disagree:
+            draw.rectangle([(W - 90, 34), (W - 10, 52)], fill=(255, 211, 42))
+            draw.text((W - 87, 37), '⚡ FLAG', font=fnt_xs, fill=C_HEADER)
 
-        # ── Divider ──────────────────────────────────────────────────────────
-        draw.rectangle([(0, 90), (W, 94)], fill=C_ACCENT)
+        # ── GREEN DIVIDER ─────────────────────────────────────────────────────
+        draw.rectangle([(0, HEADER_H), (W, HEADER_H + 3)], fill=C_ACCENT)
 
-        # ── Input metrics row ────────────────────────────────────────────────
-        y_row1 = 108
+        # ── INPUT METRICS ROW ─────────────────────────────────────────────────
+        INP_Y = HEADER_H + 6
         input_metrics = [
-            ('OAA', row.get('oaa')),
-            ('FRV', row.get('frv')),
-            ('DRS*', row.get('drs')),
-            ('Spd', row.get('sprint_speed')),
-            ('ARM', row.get('arm_runs')),
-            ('FRM', row.get('framing_runs')),
+            ('OAA',  row.get('oaa',          None)),
+            ('FRV',  row.get('frv',          None)),
+            ('DRS*', row.get('drs',          None)),
+            ('Spd',  row.get('sprint_speed', None)),
+            ('ARM',  row.get('arm_runs',     None)),
+            ('FRM',  row.get('framing_runs', None)),
         ]
         cell_w = W // len(input_metrics)
-        for i, (lbl, val) in enumerate(input_metrics):
-            x = i * cell_w + 12
-            draw.text((x, y_row1), lbl, font=fnt_xs, fill=C_SUBTEXT)
+        for idx, (lbl, val) in enumerate(input_metrics):
+            x = idx * cell_w + 14
+            draw.text((x, INP_Y), lbl, font=fnt_xs, fill=C_SUBTEXT)
             if val is None or (isinstance(val, float) and np.isnan(val)):
-                draw.text((x, y_row1 + 16), '—', font=fnt_med, fill=C_LGRAY)
+                draw.text((x, INP_Y + 14), '—', font=fnt_med, fill=C_LGRAY)
             else:
                 v = float(val)
                 col = C_ACCENT if v > 0 else (C_RED if v < 0 else C_GRAY)
                 sign = '+' if v > 0 else ''
-                draw.text((x, y_row1 + 16), f'{sign}{v:.1f}', font=fnt_med, fill=col)
+                draw.text((x, INP_Y + 14), f'{sign}{v:.1f}', font=fnt_med, fill=col)
 
         # Light separator
-        draw.rectangle([(20, 158), (W - 20, 160)], fill=C_LGRAY)
+        SEP_Y = INP_Y + 38
+        draw.rectangle([(0, SEP_Y), (W, SEP_Y + 1)], fill=C_MGRAY)
 
-        # ── Component bars ───────────────────────────────────────────────────
+        # ── COMPONENT BARS ────────────────────────────────────────────────────
+        COMP_START = SEP_Y + 10
         components = [
-            ('Conv. Runs',   'conversion_runs'),
-            ('Att. Range',   'attempt_range_score'),
-            ('RRAA',         'rraa'),
-            ('BAP',          'bap'),
-            ('Arm Runs',     'arm_runs'),
-            ('Stadium Adj.', 'stadium_correction'),
+            ('Conv. Runs',    'conversion_runs'),
+            ('Att. Range',    'attempt_range_score'),
+            ('RRAA',          'rraa'),
+            ('BAP',           'bap'),
+            ('Arm Runs',      'arm_runs'),
+            ('Framing',       'framing_runs'),
+            ('Stadium Adj.',  'stadium_correction'),
         ]
-
-        y_comp_start = 168
-        bar_h = 22
-        bar_gap = 46
-        label_w = 110
-        bar_max_w = W - label_w - 100  # space for bar + value label
-        bar_origin = label_w + 20
-
-        # Find max abs value for scaling
+        na_reasons = {
+            'rraa':         '1B only' if pos != '1B' else None,
+            'framing_runs': 'C only'  if pos != 'C'  else None,
+        }
         comp_vals = []
-        for lbl, col in components:
+        for _, col in components:
             v = row.get(col, None)
-            if v is not None and not (isinstance(v, float) and np.isnan(v)):
-                comp_vals.append(abs(float(v)))
-        max_abs = max(comp_vals) if comp_vals else 10
+            comp_vals.append(float(v) if (v is not None and not (isinstance(v, float) and np.isnan(v))) else None)
+
+        max_abs = max((abs(v) for v in comp_vals if v is not None), default=5)
         max_abs = max(max_abs, 5)
 
-        for i, (lbl, col) in enumerate(components):
-            y = y_comp_start + i * bar_gap
-            val = row.get(col, None)
+        LABEL_W  = 88
+        BAR_X    = LABEL_W + 22
+        BAR_W    = W - BAR_X - 55
+        BAR_H    = 16
+        ROW_GAP  = 30
 
-            # Label
-            draw.text((20, y + 4), lbl, font=fnt_xs, fill=C_SUBTEXT)
+        for i, ((lbl, col_key), val) in enumerate(zip(components, comp_vals)):
+            y = COMP_START + i * ROW_GAP
+            draw.text((14, y + 2), lbl, font=fnt_mono, fill=C_TEXT)
 
-            if val is None or (isinstance(val, float) and np.isnan(val)):
-                # N/A row
-                draw.rectangle([(bar_origin, y + 2), (bar_origin + bar_max_w, y + bar_h)],
-                                fill=C_LGRAY, outline=None)
-                draw.text((bar_origin + 8, y + 5), 'N/A', font=fnt_xs, fill=C_GRAY)
+            na_override = na_reasons.get(col_key)
+            if val is None or na_override:
+                # Gray N/A bar
+                draw.rectangle([(BAR_X, y), (BAR_X + BAR_W, y + BAR_H)], fill=C_LGRAY)
+                reason = na_override or 'No data'
+                draw.text((BAR_X + 6, y + 3), f'N/A — {reason}', font=fnt_xs, fill=C_SUBTEXT)
             else:
-                v = float(val)
-                bar_len = int(abs(v) / max_abs * bar_max_w * 0.9)
-                bar_len = max(bar_len, 2)
-                bar_col = C_ACCENT if v >= 0 else C_RED
+                bar_len = int(min(abs(val) / max_abs * BAR_W * 0.9, BAR_W))
+                bar_len = max(bar_len, 3)
+                bar_col = C_ACCENT if val >= 0 else C_RED
+                # Track
+                draw.rectangle([(BAR_X, y), (BAR_X + BAR_W, y + BAR_H)], fill=C_LGRAY)
+                # Bar
+                draw.rectangle([(BAR_X, y), (BAR_X + bar_len, y + BAR_H)], fill=bar_col)
+                # Value
+                sign = '+' if val > 0 else ''
+                draw.text((BAR_X + BAR_W + 6, y + 2), f'{sign}{val:.1f}', font=fnt_mono, fill=bar_col)
 
-                # Background track
-                draw.rectangle([(bar_origin, y + 2), (bar_origin + bar_max_w, y + bar_h)],
-                                fill=C_LGRAY, outline=None)
-                # Value bar
-                draw.rectangle([(bar_origin, y + 2), (bar_origin + bar_len, y + bar_h)],
-                                fill=bar_col, outline=None)
-                # Value text
-                sign = '+' if v > 0 else ''
-                draw.text((bar_origin + bar_max_w + 8, y + 5), f'{sign}{v:.1f}', font=fnt_mono, fill=bar_col)
+        # ── FOOTER ────────────────────────────────────────────────────────────
+        draw.rectangle([(0, H - 24), (W, H)], fill=C_LGRAY)
+        draw.text((14, H - 16), 'RCDef Composite Defensive Analytics · rcdef.streamlit.app · *DRS © Sports Info Solutions / Baseball Reference · Non-commercial', font=fnt_xs, fill=C_SUBTEXT)
 
-        # ── Context label ────────────────────────────────────────────────────
-        context = get_rcdef_context(rcdef)
-        draw.text((bar_origin, y_comp_start - 18), context, font=fnt_xs, fill=C_SUBTEXT)
-
-        # ── Footer ───────────────────────────────────────────────────────────
-        draw.rectangle([(0, H - 30), (W, H)], fill=C_LGRAY)
-        footer_txt = (
-            'RCDef Composite Defensive Analytics  ·  rcdef.streamlit.app  ·  '
-            '*DRS © Sports Info Solutions / Baseball Reference  ·  Non-commercial'
-        )
-        draw.text((20, H - 20), footer_txt, font=fnt_xs, fill=C_SUBTEXT)
-
-        # ── Export ───────────────────────────────────────────────────────────
+        # ── EXPORT ────────────────────────────────────────────────────────────
         buf = _io.BytesIO()
-        img.save(buf, format='JPEG', quality=92, optimize=True)
+        img.save(buf, format='JPEG', quality=93, optimize=True)
         buf.seek(0)
         return buf.getvalue()
 
-    except Exception as e:
+    except Exception:
         return None
 
+def render_player_card_html(row: pd.Series, player_name: str) -> str:
+    """
+    Build the white-background HTML player card shown in the app.
+    Same layout as the JPG download — white background, dark header,
+    input metrics row, component bars with values.
+    This is the single source of truth for card layout.
+    """
+    pos        = str(row.get('position', '?'))
+    team       = str(row.get('team', '?'))
+    inn        = float(row.get('innings', 0) or 0)
+    year       = str(row.get('data_year', ''))
+    rcdef      = row.get('rcdef', np.nan)
+    rcdef_plus = row.get('rcdef_plus', np.nan)
+    reliability= str(row.get('reliability', 'Low'))
+    disagree   = bool(row.get('disagreement_flag', False))
+    disagree_detail = str(row.get('disagreement_detail', ''))
+    context    = get_rcdef_context(rcdef)
+    rcdef_str  = format_stat(rcdef)
+    speed      = row.get('sprint_speed', np.nan)
 
-# ─────────────────────────────────────────────
-# PAGE: PLAYER CARDS
-# ─────────────────────────────────────────────
+    # Colors
+    rcdef_col  = '#00d084' if (pd.notna(rcdef) and float(rcdef) >= 0) else '#ff4757'
+    rel_col    = {'High': '#00d084', 'Medium': '#ffd32a'}.get(reliability, '#ff4757')
+    rcp_str    = f'{float(rcdef_plus):.0f}th percentile' if pd.notna(rcdef_plus) else ''
+
+    # Input metrics row
+    input_metrics = [
+        ('OAA',  row.get('oaa',         np.nan)),
+        ('FRV',  row.get('frv',         np.nan)),
+        ('DRS*', row.get('drs',         np.nan)),
+        ('Spd',  row.get('sprint_speed', np.nan)),
+        ('ARM',  row.get('arm_runs',    np.nan)),
+        ('FRM',  row.get('framing_runs', np.nan)),
+    ]
+
+    def input_cell(label, val):
+        if pd.isna(val):
+            return f'<div style="flex:1;text-align:center;"><div style="font-size:0.6rem;color:#6b7280;font-family:IBM Plex Mono;letter-spacing:0.1em;">{label}</div><div style="font-size:1.1rem;font-family:Bebas Neue;color:#d1d5db;">—</div></div>'
+        v = float(val)
+        c = '#00d084' if v > 0 else ('#ff4757' if v < 0 else '#9ca3af')
+        s = '+' if v > 0 else ''
+        return f'<div style="flex:1;text-align:center;"><div style="font-size:0.6rem;color:#6b7280;font-family:IBM Plex Mono;letter-spacing:0.1em;">{label}</div><div style="font-size:1.1rem;font-family:Bebas Neue;color:{c};">{s}{v:.1f}</div></div>'
+
+    input_row_html = ''.join(input_cell(l, v) for l, v in input_metrics)
+
+    # Component bars
+    components = [
+        ('Conv. Runs',        'conversion_runs'),
+        ('Att. Range',        'attempt_range_score'),
+        ('RRAA',             'rraa'),
+        ('BAP',              'bap'),
+        ('Arm Runs',         'arm_runs'),
+        ('Framing',          'framing_runs'),
+        ('Stadium Adj.',     'stadium_correction'),
+    ]
+
+    na_reasons = {
+        'rraa':         '1B only' if pos != '1B' else None,
+        'framing_runs': 'C only'  if pos != 'C'  else None,
+    }
+
+    comp_vals = []
+    for lbl, col in components:
+        v = row.get(col, np.nan)
+        comp_vals.append(float(v) if pd.notna(v) else None)
+
+    max_abs = max((abs(v) for v in comp_vals if v is not None), default=5)
+    max_abs = max(max_abs, 5)
+
+    def comp_bar_html(label, col_key, val):
+        na_override = na_reasons.get(col_key)
+        if val is None or na_override:
+            reason = na_override or 'No data'
+            return f'''
+            <div style="display:flex;align-items:center;margin-bottom:8px;gap:10px;">
+                <div style="width:100px;font-size:0.65rem;color:#6b7280;font-family:IBM Plex Mono;flex-shrink:0;">{label}</div>
+                <div style="flex:1;height:18px;background:#f3f4f6;border-radius:3px;display:flex;align-items:center;padding-left:8px;">
+                    <span style="font-size:0.6rem;color:#9ca3af;font-family:IBM Plex Mono;">N/A — {reason}</span>
+                </div>
+                <div style="width:40px;"></div>
+            </div>'''
+        bar_pct = min(abs(val) / max_abs * 90, 90)
+        bar_col = '#00d084' if val >= 0 else '#ff4757'
+        sign = '+' if val > 0 else ''
+        return f'''
+        <div style="display:flex;align-items:center;margin-bottom:8px;gap:10px;">
+            <div style="width:100px;font-size:0.65rem;color:#374151;font-family:IBM Plex Mono;flex-shrink:0;">{label}</div>
+            <div style="flex:1;height:18px;background:#f3f4f6;border-radius:3px;overflow:hidden;">
+                <div style="width:{bar_pct:.1f}%;height:100%;background:{bar_col};border-radius:3px;"></div>
+            </div>
+            <div style="width:40px;font-size:0.7rem;font-family:IBM Plex Mono;color:{bar_col};text-align:right;">{sign}{val:.1f}</div>
+        </div>'''
+
+    bars_html = ''.join(comp_bar_html(lbl, col, val) for (lbl, col), val in zip(components, comp_vals))
+
+    # Disagreement note
+    disagree_html = ''
+    if disagree:
+        disagree_html = f'<div style="background:#fef3c7;border:1px solid #f59e0b;border-radius:4px;padding:6px 10px;margin-top:8px;font-family:IBM Plex Mono;font-size:0.65rem;color:#92400e;">⚡ Metric Disagreement: {disagree_detail.strip()}</div>'
+
+    # Neighbor note
+    neighbor_html = ''
+    nb_sup = bool(row.get('neighbor_suppression', False))
+    nb_vac = bool(row.get('neighbor_vacuum', False))
+    if nb_sup:
+        neighbor_html = '<div style="background:#eff6ff;border:1px solid #3b82f6;border-radius:4px;padding:6px 10px;margin-top:8px;font-family:IBM Plex Mono;font-size:0.65rem;color:#1e40af;">🔵 Neighbor suppression adjustment applied (30% cap)</div>'
+    elif nb_vac:
+        neighbor_html = '<div style="background:#fef3c7;border:1px solid #f59e0b;border-radius:4px;padding:6px 10px;margin-top:8px;font-family:IBM Plex Mono;font-size:0.65rem;color:#92400e;">⚡ Neighbor vacuum flagged — no correction applied</div>'
+
+    speed_html = ''
+    if pd.notna(speed):
+        speed_html = f'<div style="background:#eff6ff;border:1px solid #3b82f6;border-radius:4px;padding:6px 10px;margin-top:8px;font-family:IBM Plex Mono;font-size:0.65rem;color:#1e40af;">ℹ Sprint Speed: {float(speed):.1f} ft/sec — context only, not in RCDef composite</div>'
+
+    html = f'''
+    <div style="background:#ffffff;border:1px solid #e5e7eb;border-radius:10px;overflow:hidden;font-family:sans-serif;max-width:860px;">
+
+      <!-- HEADER -->
+      <div style="background:#0a0e1a;padding:18px 22px 14px;">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;">
+          <div>
+            <div style="font-family:Bebas Neue,sans-serif;font-size:1.5rem;color:#00d084;letter-spacing:0.15em;line-height:1;">RCDef</div>
+            <div style="font-family:Bebas Neue,sans-serif;font-size:1.6rem;color:#f9fafb;letter-spacing:0.05em;line-height:1.1;">{player_name.upper()}</div>
+            <div style="font-family:IBM Plex Mono,monospace;font-size:0.62rem;color:#6b7280;margin-top:4px;letter-spacing:0.1em;">{team} · {POSITIONS.get(pos, pos)} · {inn:.0f} inn · {year} Season</div>
+          </div>
+          <div style="text-align:right;">
+            <div style="font-family:IBM Plex Mono,monospace;font-size:0.6rem;color:#6b7280;">RCDef</div>
+            <div style="font-family:Bebas Neue,sans-serif;font-size:2rem;color:{rcdef_col};line-height:1;">{rcdef_str}</div>
+            <div style="font-family:IBM Plex Mono,monospace;font-size:0.6rem;color:#6b7280;">{rcp_str}</div>
+            <div style="margin-top:6px;">
+              <span style="background:{rel_col};color:#0a0e1a;font-family:IBM Plex Mono,monospace;font-size:0.6rem;padding:2px 8px;border-radius:3px;">{reliability.upper()}</span>
+            </div>
+          </div>
+        </div>
+        <div style="font-family:IBM Plex Mono,monospace;font-size:0.65rem;color:#9ca3af;margin-top:8px;">{context}</div>
+        {disagree_html}
+      </div>
+
+      <!-- DIVIDER -->
+      <div style="height:3px;background:#00d084;"></div>
+
+      <!-- INPUT METRICS ROW -->
+      <div style="background:#f9fafb;padding:12px 22px;display:flex;gap:0;">
+        {input_row_html}
+      </div>
+
+      <div style="height:1px;background:#e5e7eb;"></div>
+
+      <!-- COMPONENT BARS -->
+      <div style="padding:16px 22px 12px;">
+        <div style="font-family:Bebas Neue,sans-serif;font-size:0.9rem;letter-spacing:0.1em;color:#374151;margin-bottom:12px;">COMPONENT BREAKDOWN</div>
+        {bars_html}
+        {speed_html}
+        {neighbor_html}
+      </div>
+
+      <!-- FOOTER -->
+      <div style="background:#f3f4f6;padding:8px 22px;font-family:IBM Plex Mono,monospace;font-size:0.6rem;color:#9ca3af;">
+        RCDef Composite Defensive Analytics · rcdef.streamlit.app · *DRS © Sports Info Solutions / Baseball Reference · Non-commercial
+      </div>
+
+    </div>
+    '''
+    return html
+
 
 def page_player_cards(df: pd.DataFrame, is_demo: bool):
     """Player card page with detailed breakdown."""
@@ -2230,168 +2482,44 @@ def page_player_cards(df: pd.DataFrame, is_demo: bool):
 
     row = player_row.iloc[0]
 
-    # Player header
-    pos = row.get('position', '?')
-    team = row.get('team', '?')
-    inn = row.get('innings', 0)
-    rcdef = row.get('rcdef', np.nan)
-    rcdef_plus = row.get('rcdef_plus', np.nan)
-    reliability = row.get('reliability', 'Low')
+    # Render the white-background card in the app
+    card_html = render_player_card_html(row, selected_player)
+    st.markdown(card_html, unsafe_allow_html=True)
 
-    rcdef_str = format_stat(rcdef)
-    rcdef_color = 'positive' if (pd.notna(rcdef) and rcdef > 0) else ('negative' if (pd.notna(rcdef) and rcdef < 0) else '')
-    context = get_rcdef_context(rcdef)
-
-    disagree = row.get('disagreement_flag', False)
-    disagree_detail = row.get('disagreement_detail', '')
-
-    st.markdown(f'''
-    <div class="player-card-header">
-        <div class="player-name">{selected_player}</div>
-        <div class="player-meta">{team} · {POSITIONS.get(pos, pos)} · {inn:.0f} innings · {row.get("data_year", "")} Season</div>
-        <div style="margin-top:1rem; display:flex; gap:1rem; align-items:center; flex-wrap:wrap;">
-            <span class="stat-pill pill-{"green" if (pd.notna(rcdef) and rcdef > 0) else "red"}">
-                RCDef {rcdef_str}
-            </span>
-            <span style="font-family:IBM Plex Mono;font-size:0.75rem;color:#8892a4;">{context}</span>
-            <span style="margin-left:auto;">{reliability_html(reliability)}</span>
-        </div>
-        {"" if not disagree else f'<div class="warn-box" style="margin-top:1rem;">⚡ Metric Disagreement: {disagree_detail.strip()} — metrics diverge by more than 8 runs. See methodology for explanation.</div>'}
-    </div>
-    ''', unsafe_allow_html=True)
-
-    # RCDef+ percentile bar
-    if pd.notna(rcdef_plus):
-        st.markdown('<div style="font-family:IBM Plex Mono;font-size:0.7rem;color:#8892a4;margin-bottom:0.25rem;">POSITION PERCENTILE (RCDef+)</div>', unsafe_allow_html=True)
-        st.plotly_chart(build_percentile_bar(rcdef_plus), use_container_width=True, key='pct_bar')
-
+    # ── Download section ─────────────────────────────────────────────────────
     st.markdown('<br>', unsafe_allow_html=True)
+    dl_c1, dl_c2 = st.columns(2)
 
-    # Component breakdown + radar
-    col_left, col_right = st.columns([3, 2])
-
-    with col_left:
-        st.markdown('<div style="font-family:Bebas Neue;font-size:1.4rem;letter-spacing:0.1em;color:#e8eaf0;margin-bottom:1rem;">COMPONENT BREAKDOWN</div>', unsafe_allow_html=True)
-
-        components = [
-            ('Conversion Runs', 'conversion_runs', 'How well this fielder converts chances they attempt. Derived from OAA and FRV.'),
-            ('Attempt Range Score', 'attempt_range_score', 'Whether this fielder expands or shrinks their opportunity set vs. league expectation. Includes neighbor adjustment.'),
-            ('Receiving Runs AA', 'rraa', '(1B Only) Value added on throws from infielders — dirt balls, wide throws, high throws, and stretch plays.'),
-            ('Baserunner Adv. Prevention', 'bap', 'How well this fielder suppresses extra-base advancement through positioning speed and deterrence.'),
-            ('Arm Runs', 'arm_runs', 'Direct throwing value — separate from BAP deterrence component.'),
-            ('Framing Runs', 'framing_runs', '(C Only) Run value of catcher pitch framing above average.'),
-            ('Stadium Correction', 'stadium_correction', 'Adjustment for known Gameday coordinate distortions in certain stadiums.'),
-        ]
-
-        for label, col, tooltip in components:
-            val = row.get(col, np.nan)
-            val_str = format_stat(val)
-            pill_class = color_stat(val)
-
-            is_na = (val_str == '-')
-            na_reason = ''
-            if is_na:
-                if col == 'rraa' and pos != '1B':
-                    na_reason = 'Not applicable — 1B only'
-                elif col == 'framing_runs' and pos != 'C':
-                    na_reason = 'Not applicable — C only'
-                else:
-                    na_reason = 'Insufficient data'
-
-            # Build right-side HTML in Python to avoid f-string rendering issues
-            if is_na:
-                right_html = f'<span style="font-family:IBM Plex Mono;font-size:0.72rem;color:#4a5568;">{na_reason}</span>'
-            else:
-                right_html = f'<span class="stat-pill {pill_class}" style="font-size:1rem;padding:0.3rem 0.8rem;">{val_str}</span>'
-
-            st.markdown(f'''
-            <div class="metric-card" style="padding:0.8rem 1.2rem;margin-bottom:0.5rem;">
-                <div style="display:flex;justify-content:space-between;align-items:center;">
-                    <div style="flex:1;min-width:0;">
-                        <div class="metric-label" style="margin-bottom:0.2rem;">{label}</div>
-                        <div style="font-family:IBM Plex Mono;font-size:0.65rem;color:#4a5568;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{tooltip[:80]}...</div>
-                    </div>
-                    <div style="flex-shrink:0;margin-left:1rem;">{right_html}</div>
-                </div>
-            </div>
-            ''', unsafe_allow_html=True)
-
-        # Sprint speed (context only, not in composite)
-        speed = row.get('sprint_speed', np.nan)
-        st.markdown(f'''
-        <div class="info-box" style="margin-top:0.5rem;">
-            ℹ Sprint Speed: {format_stat(speed, 1, False)} ft/sec — context only, not included in RCDef composite
-        </div>
-        ''', unsafe_allow_html=True)
-
-    with col_right:
-        st.markdown('<div style="font-family:Bebas Neue;font-size:1.4rem;letter-spacing:0.1em;color:#e8eaf0;margin-bottom:1rem;">COMPONENT RADAR</div>', unsafe_allow_html=True)
-        st.plotly_chart(build_radar_chart(row, selected_player), use_container_width=True, key='radar')
-
-        # Input metrics comparison
-        st.markdown('<div style="font-family:Bebas Neue;font-size:1.1rem;letter-spacing:0.1em;color:#8892a4;margin:1rem 0 0.5rem;">INPUT METRICS</div>', unsafe_allow_html=True)
-
-        input_metrics = [
-            ('OAA', 'oaa', 'Outs Above Average (MLB/Statcast)'),
-            ('FRV', 'frv', 'Fielding Run Value (Statcast)'),
-            ('DRS', 'drs', 'Defensive Runs Saved (SIS/BR)'),
-        ]
-
-        for label, col, source in input_metrics:
-            val = row.get(col, np.nan)
-            val_str = format_stat(val)
-            pill_class = color_stat(val)
-            st.markdown(f'''
-            <div style="display:flex;justify-content:space-between;align-items:center;padding:0.5rem 0;border-bottom:1px solid #1e2d42;">
-                <div>
-                    <span style="font-family:IBM Plex Mono;font-size:0.8rem;color:#e8eaf0;">{label}</span>
-                    <span style="font-family:IBM Plex Mono;font-size:0.6rem;color:#4a5568;display:block;">{source}</span>
-                </div>
-                <span class="stat-pill {pill_class}">{val_str}</span>
-            </div>
-            ''', unsafe_allow_html=True)
-
-    # Neighbor adjustment detail (infielders)
-    if pos in ['2B', 'SS', '3B', '1B']:
-        st.markdown('<br>', unsafe_allow_html=True)
-        neighbor_suppression = row.get('neighbor_suppression', False)
-        neighbor_vacuum = row.get('neighbor_vacuum', False)
-
-        if neighbor_suppression:
-            st.markdown('''<div class="info-box">
-            🔵 Neighbor Suppression Detected: Attempt Range includes a partial credit adjustment (capped at 30%).
-            A neighboring fielder appears to be cutting off balls in a zone where this player shows below-average
-            attempt rates. The adjustment is scaled to signal strength and disclosed here for transparency.
-            </div>''', unsafe_allow_html=True)
-        elif neighbor_vacuum:
-            st.markdown('''<div class="warn-box">
-            ⚡ Neighbor Vacuum Flagged: This player's Attempt Range score may be partially inflated by
-            a below-average neighboring fielder creating additional opportunities. No correction is applied —
-            this flag is for transparency. Consider alongside eye-test and scouting evaluations.
-            </div>''', unsafe_allow_html=True)
-        else:
-            st.markdown('''<div style="font-family:IBM Plex Mono;font-size:0.65rem;color:#4a5568;padding:0.5rem 0;">
-            No neighbor adjustment applied for this player.
-            </div>''', unsafe_allow_html=True)
-
-    # ── JPG Player Card Download ─────────────────────────────────────────────
-    st.markdown('<br>', unsafe_allow_html=True)
-    st.markdown('<div style="font-family:Bebas Neue;font-size:1.2rem;letter-spacing:0.1em;color:#8892a4;">DOWNLOAD PLAYER CARD</div>', unsafe_allow_html=True)
-
-    if st.button('Generate Player Card JPG', use_container_width=False, key='gen_jpg'):
+    with dl_c1:
+        # JPG download — same layout as the card above
         jpg_bytes = build_player_card_jpg(row, selected_player)
         if jpg_bytes:
             safe_name = selected_player.replace(' ', '_').replace('.', '').replace("'", '')
             st.download_button(
-                label=f'⬇ Download {selected_player} Card (.jpg)',
+                label=f'⬇ Download Player Card (.jpg)',
                 data=jpg_bytes,
-                file_name=f'rcdef_{safe_name}_{row.get("data_year","2025")}.jpg',
+                file_name=f'rcdef_{safe_name}_{row.get("data_year", "2025")}.jpg',
                 mime='image/jpeg',
-                use_container_width=False,
+                use_container_width=True,
                 key='dl_jpg',
             )
         else:
-            st.error('Card generation failed. Check that Pillow is installed.')
+            st.error('JPG generation failed — check Pillow is installed.')
+
+    with dl_c2:
+        # CSV of this player's full row
+        player_csv = pd.DataFrame([row]).drop(
+            columns=[c for c in ['is_demo', 'disagreement_detail', 'sample_size'] if c in row.index],
+            errors='ignore'
+        )
+        st.download_button(
+            label='⬇ Download Player Data (.csv)',
+            data=player_csv.to_csv(index=False).encode('utf-8'),
+            file_name=f'rcdef_{selected_player.replace(" ", "_")}_{row.get("data_year", "2025")}.csv',
+            mime='text/csv',
+            use_container_width=True,
+            key='dl_player_csv',
+        )
 
 
 # ─────────────────────────────────────────────
