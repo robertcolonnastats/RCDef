@@ -800,6 +800,7 @@ def standardize_columns(df: pd.DataFrame, source: str) -> pd.DataFrame:
         'savant_oaa': {
             'outs_above_average': 'oaa',
             'fielding_run_value': 'frv',
+            'fielding_runs_prevented': 'frv',
             # Team — all known Savant column names
             'team_name_alt':     'team',
             'team_name_abbrev':  'team',
@@ -1435,7 +1436,7 @@ def _build_master_dataset_inner(year: int):
             'innings':      ['innings', 'inn'],
             'oaa':          ['oaa', 'outs_above_average'],
             'oaa_attempts': ['oaa_attempts', 'attempts', 'n_attempts', 'n_att'],
-            'frv':          ['frv', 'fielding_run_value'],
+            'frv':          ['frv', 'fielding_run_value', 'fielding_runs_prevented'],
             'arm_runs':     ['arm_runs'],
             'sprint_speed': ['sprint_speed'],
         }.items():
@@ -1538,18 +1539,29 @@ def _build_master_dataset_inner(year: int):
 
     # Merge DRS (Baseball Reference / Sports Info Solutions)
     if not drs_df.empty:
-        drs_col = next((c for c in ['DRS', 'Rdrs', 'rdrs'] if c in drs_df.columns), None)
-        name_col = next((c for c in ['Name', 'Player', 'player_name'] if c in drs_df.columns), None)
+        # DRS from BR — try multiple possible column names
+        drs_col = next((c for c in ['DRS', 'Rdrs', 'rdrs', 'drs'] if c in drs_df.columns), None)
+        name_col = next((c for c in ['Name', 'Player', 'player_name', 'name'] if c in drs_df.columns), None)
+        if not drs_col:
+            # Look for any column that might contain DRS values
+            for c in drs_df.columns:
+                if 'drs' in c.lower() or 'run' in c.lower():
+                    drs_col = c
+                    break
         if drs_col and name_col:
             drs_sub = drs_df[[name_col, drs_col]].rename(
                 columns={name_col: 'player_name', drs_col: 'drs'}
             ).copy()
+            # Convert DRS to numeric
+            drs_sub['drs'] = pd.to_numeric(drs_sub['drs'], errors='coerce')
+            drs_sub = drs_sub.dropna(subset=['drs'])
             drs_sub['_key'] = drs_sub['player_name'].apply(standardize_player_name)
             base_df['_key'] = base_df['player_name'].apply(standardize_player_name)
             base_df = base_df.merge(
                 drs_sub[['_key', 'drs']], on='_key', how='left', suffixes=('', '_drs')
             )
             base_df = base_df.drop(columns=['_key', 'drs_drs'], errors='ignore')
+            status['drs_matched'] = int(base_df['drs'].notna().sum())
 
     # Innings: ensure numeric, estimate if missing
     if 'innings' not in base_df.columns:
@@ -1586,6 +1598,9 @@ def _build_master_dataset_inner(year: int):
     # Normalize dtypes — convert Arrow-backed columns to numpy float64
     # Required for pandas 3.x arithmetic compatibility
     main_df = normalize_dtypes(main_df)
+
+    # Drop any stale demo flag that may have come from a previous cached run
+    main_df = main_df.drop(columns=['is_demo'], errors='ignore')
 
     # Apply calculations
     raw_statcast = pd.DataFrame()  # Full Statcast too large for cached session; use summary metrics
@@ -3398,14 +3413,9 @@ def main():
     with st.spinner('Loading defensive data...'):
         df, status = build_master_dataset(year)
 
-    # Determine demo mode safely
-    try:
-        is_demo = (
-            status.get('mode', 'demo') == 'demo' or
-            ('is_demo' in df.columns and bool(df['is_demo'].any()))
-        )
-    except Exception:
-        is_demo = True
+    # Determine demo mode from status only — never from df column
+    # (is_demo column in df can be stale from a cached previous run)
+    is_demo = status.get('mode', 'demo') != 'live'
 
     if df is None or (hasattr(df, 'empty') and df.empty):
         try:
