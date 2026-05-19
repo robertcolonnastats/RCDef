@@ -294,7 +294,7 @@ hr {
 # ─────────────────────────────────────────────
 CURRENT_YEARS = [2025, 2026]
 MIN_INNINGS = 300
-CACHE_VERSION = 3  # Increment this to bust all cached results
+CACHE_VERSION = 4  # Increment this to bust all cached results
 MIN_RRAA_ATTEMPTS = 50
 DISAGREEMENT_THRESHOLD = 8
 NEIGHBOR_STD_THRESHOLD = 1.0
@@ -1354,12 +1354,17 @@ def build_master_dataset(year: int, _cache_version: int = CACHE_VERSION):
     """
     status = {'mode': 'demo', 'last_updated': 'unknown'}
     try:
-        return _build_master_dataset_inner(year)
+        result_df, result_status = _build_master_dataset_inner(year)
+        # If pipeline succeeded in live mode, remove any stale demo_reason
+        if result_status.get('mode') == 'live':
+            result_status.pop('demo_reason', None)
+            result_status.pop('traceback', None)
+        return result_df, result_status
     except Exception as e:
-        import traceback
+        import traceback as tb
         status['mode'] = 'demo'
-        status['demo_reason'] = f'Exception in pipeline: {type(e).__name__}: {str(e)[:200]}'
-        status['traceback'] = traceback.format_exc()[-800:]
+        status['demo_reason'] = f'Exception: {type(e).__name__}: {str(e)[:200]}'
+        status['traceback'] = tb.format_exc()[-800:]
         status['last_updated'] = 'error'
         try:
             return build_demo_dataset(year), status
@@ -3425,7 +3430,16 @@ def main():
 
     # Determine demo mode from status only — never from df column
     # (is_demo column in df can be stale from a cached previous run)
-    is_demo = status.get('mode', 'demo') != 'live'
+    # Clean stale demo artifacts from status if pipeline succeeded
+    _pipeline_mode = status.get('mode', 'demo')
+    if _pipeline_mode == 'live':
+        status.pop('demo_reason', None)
+        status.pop('traceback', None)
+    # is_demo is ONLY True when pipeline explicitly returned mode != 'live'
+    is_demo = (_pipeline_mode != 'live')
+    # Store for diagnostics
+    status['_computed_is_demo'] = is_demo
+    status['_pipeline_mode'] = _pipeline_mode
 
     if df is None or (hasattr(df, 'empty') and df.empty):
         try:
