@@ -1348,8 +1348,25 @@ def calculate_disagreement_flag(df: pd.DataFrame) -> pd.DataFrame:
 def build_master_dataset(year: int):
     """
     Master pipeline: fetch all sources, calculate all metrics, return unified dataset.
-    Returns (dataframe, status_dict)
+    Returns (dataframe, status_dict). NEVER raises — always returns valid data.
     """
+    status = {'mode': 'demo', 'last_updated': 'unknown'}
+    try:
+        return _build_master_dataset_inner(year)
+    except Exception as e:
+        import traceback
+        status['mode'] = 'demo'
+        status['demo_reason'] = f'Exception in pipeline: {type(e).__name__}: {str(e)[:200]}'
+        status['traceback'] = traceback.format_exc()[-800:]
+        status['last_updated'] = 'error'
+        try:
+            return build_demo_dataset(year), status
+        except Exception:
+            return build_demo_dataset(2025), status
+
+
+def _build_master_dataset_inner(year: int):
+    """Inner pipeline — called by build_master_dataset with exception wrapper."""
     status = {}
 
     oaa_df = fetch_savant_oaa(year)
@@ -1995,8 +2012,11 @@ def page_leaderboard(df: pd.DataFrame, status: dict, is_demo: bool):
         st.markdown(f'''<div class="warn-box">
         ⚠ DEMO MODE — Live data sources returned no data. Displaying synthetic data.<br>
         <span style="opacity:0.7;font-size:0.9em;">Reason: {demo_reason}</span><br>
-        <span style="opacity:0.7;font-size:0.9em;">Download the Diagnostics CSV below to see exactly what each source returned.</span>
+        <span style="opacity:0.7;font-size:0.9em;">Use the ⬇ Diagnostics CSV button in the sidebar to see exactly what each source returned.</span>
         </div>''', unsafe_allow_html=True)
+        if status.get('traceback'):
+            with st.expander('Pipeline error details'):
+                st.code(status.get('traceback', ''), language='python')
 
     # Filters
     col1, col2, col3, col4, col5 = st.columns([2, 2, 2, 2, 2])
@@ -3388,16 +3408,22 @@ def main():
         is_demo = True
 
     if df is None or (hasattr(df, 'empty') and df.empty):
-        # Last-resort fallback — should never reach here
         try:
             df = build_demo_dataset(year)
             is_demo = True
-            status = {'mode': 'demo', 'demo_reason': 'Emergency fallback', 'last_updated': 'unknown'}
+            if 'demo_reason' not in status:
+                status['demo_reason'] = 'Emergency fallback'
         except Exception as e:
-            st.error(f'Unable to load data: {e}')
+            st.error(f'Unable to load data even in demo mode: {e}')
             return
 
-    # Data source diagnostics in sidebar (after data loads)
+    # Show traceback in expander if pipeline crashed
+    if status.get('traceback'):
+        with st.expander('⚠ Pipeline error details (for debugging)', expanded=True):
+            st.code(status.get('traceback', ''), language='python')
+            st.markdown('**Please share this with the developer.**')
+
+    # Data source diagnostics in sidebar (always visible)
     with st.sidebar:
         st.markdown('''
         <div style="font-family:Bebas Neue;font-size:1.0rem;letter-spacing:0.1em;color:#4a5568;
@@ -3431,6 +3457,50 @@ def main():
             Mode: {mode.upper()} | Base: {base}</div>''',
             unsafe_allow_html=True
         )
+
+        st.markdown('<br>', unsafe_allow_html=True)
+
+        # ── Diagnostics download — always available ────────────────────────
+        try:
+            diag_rows = []
+            diag_rows.append({'key': 'mode',          'value': status.get('mode', 'unknown')})
+            diag_rows.append({'key': 'base_source',   'value': status.get('base_source', 'none')})
+            diag_rows.append({'key': 'last_updated',  'value': status.get('last_updated', 'unknown')})
+            diag_rows.append({'key': 'demo_reason',   'value': status.get('demo_reason', '')})
+            diag_rows.append({'key': 'traceback',     'value': status.get('traceback', '')})
+            diag_rows.append({'key': 'frv_estimated', 'value': str(status.get('frv_estimated', False))})
+            diag_rows.append({'key': 'innings_estimated', 'value': str(status.get('innings_estimated', False))})
+            diag_rows.append({'key': 'adaptive_threshold', 'value': str(status.get('adaptive_threshold', ''))})
+            for src_name, src_status in source_info:
+                diag_rows.append({
+                    'key': f'{src_name}_rows',
+                    'value': str(src_status.get('rows', 0))
+                })
+            # Add column lists
+            for col_key in ['oaa_cols', 'frv_cols', 'speed_cols', 'arm_cols', 'framing_cols']:
+                diag_rows.append({
+                    'key': col_key,
+                    'value': str(status.get(col_key, []))
+                })
+            # Add full dataframe if available
+            if not df.empty:
+                full_diag = df.copy()
+                for row in diag_rows:
+                    full_diag[f'_diag_{row["key"]}'] = row['value']
+            else:
+                full_diag = pd.DataFrame(diag_rows)
+
+            diag_bytes = full_diag.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label='⬇ Diagnostics CSV',
+                data=diag_bytes,
+                file_name=f'rcdef_diagnostics_{year}.csv',
+                mime='text/csv',
+                use_container_width=True,
+                key='sidebar_diag_dl',
+            )
+        except Exception as diag_e:
+            st.caption(f'Diagnostics error: {diag_e}')
 
     # Route to page
     if page == 'Leaderboard':
