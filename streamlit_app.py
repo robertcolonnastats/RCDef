@@ -294,6 +294,7 @@ hr {
 # ─────────────────────────────────────────────
 CURRENT_YEARS = [2025, 2026]
 MIN_INNINGS = 300
+CACHE_VERSION = 3  # Increment this to bust all cached results
 MIN_RRAA_ATTEMPTS = 50
 DISAGREEMENT_THRESHOLD = 8
 NEIGHBOR_STD_THRESHOLD = 1.0
@@ -1346,7 +1347,7 @@ def calculate_disagreement_flag(df: pd.DataFrame) -> pd.DataFrame:
 # ─────────────────────────────────────────────
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def build_master_dataset(year: int):
+def build_master_dataset(year: int, _cache_version: int = CACHE_VERSION):
     """
     Master pipeline: fetch all sources, calculate all metrics, return unified dataset.
     Returns (dataframe, status_dict). NEVER raises — always returns valid data.
@@ -1369,6 +1370,7 @@ def build_master_dataset(year: int):
 def _build_master_dataset_inner(year: int):
     """Inner pipeline — called by build_master_dataset with exception wrapper."""
     status = {}
+    status['cache_version'] = CACHE_VERSION
 
     oaa_df = fetch_savant_oaa(year)
     status['oaa'] = get_data_status(oaa_df, 'Baseball Savant OAA')
@@ -1717,7 +1719,7 @@ def build_demo_dataset(year: int) -> pd.DataFrame:
             'neighbor_flag': False,
             'neighbor_suppression': False,
             'neighbor_vacuum': False,
-            'is_demo': True,
+            # is_demo column removed — use status['mode'] instead
         })
 
     df = pd.DataFrame(rows)
@@ -3406,12 +3408,20 @@ def main():
 
         # Refresh button
         if st.button('🔄 Refresh Data', use_container_width=True):
+            # Clear ALL cached data — forces fresh fetch from all sources
             st.cache_data.clear()
+            st.rerun()
+
+        # Hard cache bust — use when app is stuck in demo mode despite live data
+        if st.button('🗑️ Clear Cache & Reload', use_container_width=True, 
+                     help='Use this if app is stuck showing DEMO MODE incorrectly'):
+            st.cache_data.clear()
+            st.session_state.clear()
             st.rerun()
 
     # Load data
     with st.spinner('Loading defensive data...'):
-        df, status = build_master_dataset(year)
+        df, status = build_master_dataset(year, _cache_version=CACHE_VERSION)
 
     # Determine demo mode from status only — never from df column
     # (is_demo column in df can be stale from a cached previous run)
