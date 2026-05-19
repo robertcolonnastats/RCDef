@@ -2029,7 +2029,7 @@ def page_leaderboard(df: pd.DataFrame, status: dict, is_demo: bool):
 
     st.markdown('<div class="section-header">Leaderboard</div>', unsafe_allow_html=True)
 
-    if is_demo:
+    if status.get('mode', 'demo') != 'live':
         demo_reason = status.get('demo_reason', 'Data sources returned no qualifying players.')
         st.markdown(f'''<div class="warn-box">
         ⚠ DEMO MODE — Live data sources returned no data. Displaying synthetic data.<br>
@@ -2767,8 +2767,9 @@ def render_player_card_html(row: pd.Series, player_name: str) -> str:
     return html
 
 
-def page_player_cards(df: pd.DataFrame, is_demo: bool):
+def page_player_cards(df: pd.DataFrame, is_demo: bool, status: dict = None):
     """Player card page — full rich white-background layout with all charts."""
+    if status is None: status = {}
 
     st.markdown('<div class="section-header">Player Cards</div>', unsafe_allow_html=True)
 
@@ -2971,8 +2972,9 @@ def page_player_cards(df: pd.DataFrame, is_demo: bool):
 # PAGE: TEAM DEFENSE
 # ─────────────────────────────────────────────
 
-def page_team_defense(df: pd.DataFrame, is_demo: bool):
+def page_team_defense(df: pd.DataFrame, is_demo: bool, status: dict = None):
     """Team-level aggregate defensive view."""
+    if status is None: status = {}
 
     st.markdown('<div class="section-header">Team Defense</div>', unsafe_allow_html=True)
 
@@ -3540,9 +3542,9 @@ def main():
     if page == 'Leaderboard':
         page_leaderboard(df, status, is_demo)
     elif page == 'Player Cards':
-        page_player_cards(df, is_demo)
+        page_player_cards(df, is_demo, status)
     elif page == 'Team Defense':
-        page_team_defense(df, is_demo)
+        page_team_defense(df, is_demo, status)
     elif page == 'Methodology':
         page_methodology()
 
