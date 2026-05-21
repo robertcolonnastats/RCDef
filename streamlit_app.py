@@ -292,7 +292,7 @@ hr {
 # ─────────────────────────────────────────────
 # CONSTANTS
 # ─────────────────────────────────────────────
-CURRENT_YEARS = [2025, 2026]
+CURRENT_YEARS = [2026, 2025]
 MIN_INNINGS = 300
 CACHE_VERSION = 6  # Increment this to bust all cached results
 MIN_RRAA_ATTEMPTS = 50
@@ -1627,6 +1627,14 @@ def _build_master_dataset_inner(year: int):
     main_df = calculate_disagreement_flag(main_df)
 
     main_df['sample_size'] = 'Full'
+
+    # Safety: if 300-inn filter removed everyone, use all players as Limited
+    if main_df.empty and not limited_df.empty:
+        main_df = limited_df.copy()
+        main_df['sample_size'] = 'Limited'
+        limited_df = pd.DataFrame()
+        status['note'] = 'All players below 300-inn threshold — showing as Limited'
+
     if not limited_df.empty:
         limited_df = calculate_stadium_correction(limited_df)
         limited_df = calculate_attempt_range_score(limited_df, raw_statcast)
@@ -1643,9 +1651,18 @@ def _build_master_dataset_inner(year: int):
     status['players_limited'] = len(limited_df)
     status['last_updated'] = datetime.now().strftime('%Y-%m-%d %H:%M UTC')
 
-    status['rows_final'] = len(main_df)
-    status['final_cols'] = list(main_df.columns)[:10]
-    return main_df, status
+    # Combine full and limited season players into one dataset
+    # Limited players get RCDef+ = NaN (insufficient sample) but are shown
+    if not limited_df.empty and not main_df.empty:
+        combined = pd.concat([main_df, limited_df], ignore_index=True)
+    elif not limited_df.empty:
+        combined = limited_df
+    else:
+        combined = main_df
+
+    status['rows_final'] = len(combined)
+    status['final_cols'] = list(combined.columns)[:10]
+    return combined, status
 
 
 def build_demo_dataset(year: int) -> pd.DataFrame:
@@ -2080,14 +2097,22 @@ def page_leaderboard(df: pd.DataFrame, status: dict, is_demo: bool):
     # Apply filters
     filtered = df.copy()
 
+    # Year filter — apply to actual data
+    if 'data_year' in filtered.columns:
+        filtered = filtered[filtered['data_year'].astype(str) == str(year_filter)]
+
     if pos_filter != 'All Positions':
         filtered = filtered[filtered['position'] == pos_filter]
 
     if team_filter != 'All Teams':
         filtered = filtered[filtered['team'] == team_filter]
 
+    # sample_size filter — must use column access not .get()
     if sample_filter == 'Full Season (300+ inn)':
-        filtered = filtered[filtered.get('sample_size', 'Full') == 'Full']
+        if 'sample_size' in filtered.columns:
+            filtered = filtered[filtered['sample_size'] == 'Full']
+        elif 'innings' in filtered.columns:
+            filtered = filtered[pd.to_numeric(filtered['innings'], errors='coerce').fillna(0) >= 300]
 
     if sort_by in filtered.columns:
         filtered[sort_by] = pd.to_numeric(filtered[sort_by], errors='coerce')
