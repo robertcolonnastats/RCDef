@@ -294,7 +294,7 @@ hr {
 # ─────────────────────────────────────────────
 CURRENT_YEARS = [2025, 2026]
 MIN_INNINGS = 300
-CACHE_VERSION = 4  # Increment this to bust all cached results
+CACHE_VERSION = 5  # Increment this to bust all cached results
 MIN_RRAA_ATTEMPTS = 50
 DISAGREEMENT_THRESHOLD = 8
 NEIGHBOR_STD_THRESHOLD = 1.0
@@ -1204,7 +1204,7 @@ def calculate_rcdef(df: pd.DataFrame) -> pd.DataFrame:
     df['conversion_runs'] = cr_values
 
     # Sum components
-    components = ['conversion_runs', 'attempt_range_score', 'bap', 'arm_runs', 'stadium_correction']
+    components = ['conversion_runs', 'attempt_range_score', 'bap', 'arm_runs']
     # Add RRAA for 1B
     if 'rraa' in df.columns:
         components.append('rraa')
@@ -1730,6 +1730,8 @@ def build_demo_dataset(year: int) -> pd.DataFrame:
     df = pd.DataFrame(rows)
 
     # Calculate RCDef
+    # Recalculate composite with current formula (removes any hardcoded values)
+    df = calculate_stadium_correction(df)
     df = calculate_rcdef(df)
     df = calculate_rcdef_plus(df)
     df = calculate_reliability(df)
@@ -2082,6 +2084,7 @@ def page_leaderboard(df: pd.DataFrame, status: dict, is_demo: bool):
         filtered = filtered[filtered.get('sample_size', 'Full') == 'Full']
 
     if sort_by in filtered.columns:
+        filtered[sort_by] = pd.to_numeric(filtered[sort_by], errors='coerce')
         filtered = filtered.sort_values(sort_by, ascending=False, na_position='last')
 
     # Summary metrics row
@@ -2718,23 +2721,24 @@ def render_player_card_html(row: pd.Series, player_name: str) -> str:
 
     <div style="padding:18px 18px;background:#ffffff;">
       <div style="font-size:10px;letter-spacing:0.12em;text-transform:uppercase;color:#9ca3af;margin-bottom:10px;font-weight:500;">Component radar</div>
-      <svg viewBox="0 0 200 175" style="width:100%;max-width:220px;display:block;margin:0 auto 16px;">
+      <svg viewBox="0 0 200 185" style="width:100%;max-width:220px;display:block;margin:0 auto 16px;">
         <defs><style>.rl{{fill:none;stroke:#e5e7eb;stroke-width:0.75}}.rt{{font-size:9px;fill:#9ca3af;text-anchor:middle;font-family:system-ui,sans-serif}}</style></defs>
         <g transform="translate(100,88)">
-          <polygon points="0,-60 52,-30 52,30 0,60 -52,30 -52,-30" class="rl"/>
-          <polygon points="0,-40 34.6,-20 34.6,20 0,40 -34.6,20 -34.6,-20" class="rl"/>
-          <polygon points="0,-20 17.3,-10 17.3,10 0,20 -17.3,10 -17.3,-10" class="rl"/>
-          <line x1="0" y1="-60" x2="0" y2="60" class="rl"/>
-          <line x1="52" y1="-30" x2="-52" y2="30" class="rl"/>
-          <line x1="52" y1="30" x2="-52" y2="-30" class="rl"/>
+          <polygon points="0,-60 57,-18.5 35.3,48.5 -35.3,48.5 -57,-18.5" class="rl"/>
+          <polygon points="0,-40 38,-12.3 23.5,32.4 -23.5,32.4 -38,-12.3" class="rl"/>
+          <polygon points="0,-20 19,-6.2 11.8,16.2 -11.8,16.2 -19,-6.2" class="rl"/>
+          <line x1="0" y1="-60" x2="35.3" y2="48.5" class="rl"/>
+          <line x1="57" y1="-18.5" x2="-35.3" y2="48.5" class="rl"/>
+          <line x1="35.3" y1="48.5" x2="-57" y2="-18.5" class="rl"/>
+          <line x1="-35.3" y1="48.5" x2="0" y2="-60" class="rl"/>
+          <line x1="-57" y1="-18.5" x2="57" y2="-18.5" class="rl"/>
           <polygon points="{_radar_pts(row, max_abs)}" style="fill:rgba(5,150,105,0.15);stroke:#059669;stroke-width:1.5;stroke-linejoin:round"/>
           {_radar_dots(row, max_abs)}
-          <text x="0" y="-67" class="rt">Conv. Runs</text>
-          <text x="62" y="-33" class="rt" style="text-anchor:start">Att. Range</text>
-          <text x="62" y="38" class="rt" style="text-anchor:start">BAP</text>
-          <text x="0" y="74" class="rt">Arm Runs</text>
-          <text x="-62" y="38" class="rt" style="text-anchor:end">Stad. Adj.</text>
-          <text x="-62" y="-33" class="rt" style="text-anchor:end">FRV</text>
+          <text x="0" y="-68" class="rt">Conv. Runs</text>
+          <text x="66" y="-20" class="rt" style="text-anchor:start">Att. Range</text>
+          <text x="44" y="62" class="rt" style="text-anchor:start">BAP</text>
+          <text x="-44" y="62" class="rt" style="text-anchor:end">Arm Runs</text>
+          <text x="-66" y="-20" class="rt" style="text-anchor:end">FRV</text>
         </g>
       </svg>
 
@@ -2755,17 +2759,15 @@ def render_player_card_html(row: pd.Series, player_name: str) -> str:
 
 
 def _radar_pts(row, max_abs):
-    """Calculate radar polygon points from component values."""
-    # 6 axes: Conv.Runs(top), Att.Range(top-right), BAP(bot-right), Arm(bot), Stad(bot-left), FRV(top-left)
+    """Calculate radar polygon points — 5-axis pentagon (stadium correction removed)."""
+    import math
     axes = [
         row.get('conversion_runs', 0),
         row.get('attempt_range_score', 0),
         row.get('bap', 0),
         row.get('arm_runs', 0),
-        row.get('stadium_correction', 0),
         row.get('frv', 0),
     ]
-    import math
     pts = []
     for i, v in enumerate(axes):
         try:
@@ -2773,7 +2775,7 @@ def _radar_pts(row, max_abs):
         except Exception:
             v = 0.0
         r = min(abs(v) / max(max_abs, 3) * 55, 55)
-        angle = math.radians(-90 + i * 60)
+        angle = math.radians(-90 + i * 72)
         x = round(r * math.cos(angle), 1)
         y = round(r * math.sin(angle), 1)
         pts.append(f'{x},{y}')
@@ -2788,7 +2790,6 @@ def _radar_dots(row, max_abs):
         row.get('attempt_range_score', 0),
         row.get('bap', 0),
         row.get('arm_runs', 0),
-        row.get('stadium_correction', 0),
         row.get('frv', 0),
     ]
     dots = ''
@@ -2798,7 +2799,7 @@ def _radar_dots(row, max_abs):
         except Exception:
             v = 0.0
         r = min(abs(v) / max(max_abs, 3) * 55, 55)
-        angle = math.radians(-90 + i * 60)
+        angle = math.radians(-90 + i * 72)
         x = round(r * math.cos(angle), 1)
         y = round(r * math.sin(angle), 1)
         dots += f'<circle cx="{x}" cy="{y}" r="3" fill="#059669"/>'
