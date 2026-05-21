@@ -1450,12 +1450,13 @@ def _build_master_dataset_inner(year: int):
             existing = pick_col(base_df, options)
             if existing and existing != canonical:
                 base_df[canonical] = base_df[existing]
-        # Keep only canonical columns that exist
-        keep = ['player_name', 'data_year', 'team', 'position', 'innings',
-                'oaa', 'oaa_attempts', 'frv', 'arm_runs', 'sprint_speed']
-        base_df = base_df[[c for c in keep if c in base_df.columns]].copy()
+        # Preserve ALL columns from OAA response — don't filter to keep list yet.
+        # Some columns (inn, attempts) may use non-canonical names and get dropped
+        # if we filter too early. We filter after ensuring required cols exist.
+        # Just rename to canonical names; keep everything for now.
         status['mode'] = 'live'
         status['base_source'] = 'Savant OAA'
+        base_df = base_df.copy()
 
     elif has_players(frv_df):
         base_df = frv_df.copy()
@@ -1469,10 +1470,9 @@ def _build_master_dataset_inner(year: int):
             existing = pick_col(base_df, options)
             if existing and existing != canonical:
                 base_df[canonical] = base_df[existing]
-        keep = ['player_name', 'data_year', 'team', 'position', 'innings', 'frv', 'oaa']
-        base_df = base_df[[c for c in keep if c in base_df.columns]].copy()
         status['mode'] = 'live'
         status['base_source'] = 'Savant FRV'
+        base_df = base_df.copy()
 
     else:
         try:
@@ -1570,20 +1570,37 @@ def _build_master_dataset_inner(year: int):
             base_df = base_df.drop(columns=['_key', 'drs_drs'], errors='ignore')
             status['drs_matched'] = int(base_df['drs'].notna().sum())
 
-    # Innings: ensure numeric, estimate if missing
+    # Innings: check all known column name variants, then estimate if still missing
+    for inn_col in ['innings', 'inn', 'innings_played', 'total_innings']:
+        if inn_col in base_df.columns and inn_col != 'innings':
+            base_df['innings'] = base_df[inn_col]
+            break
     if 'innings' not in base_df.columns:
         base_df['innings'] = 0.0
     base_df['innings'] = pd.to_numeric(base_df['innings'], errors='coerce').fillna(0)
 
-    # If innings are all zero, estimate from attempts
-    if base_df['innings'].sum() == 0 and 'oaa_attempts' in base_df.columns:
-        pos_inn_rates = {'LF':4.0,'CF':4.0,'RF':4.0,'C':3.5}
-        def est_inn(row):
-            att = pd.to_numeric(row.get('oaa_attempts', 0), errors='coerce') or 0
-            rate = pos_inn_rates.get(str(row.get('position','')), 3.0)
-            return round(att * rate, 1)
-        base_df['innings'] = base_df.apply(est_inn, axis=1)
-    status['innings_estimated'] = True
+    # Attempts: check all known column name variants
+    for att_col in ['oaa_attempts', 'attempts', 'n_attempts', 'n_att']:
+        if att_col in base_df.columns and att_col != 'oaa_attempts':
+            base_df['oaa_attempts'] = base_df[att_col]
+            break
+    if 'oaa_attempts' not in base_df.columns:
+        base_df['oaa_attempts'] = np.nan
+
+    # If innings are all zero, estimate from attempts (3 inn/att infield, 4 outfield)
+    if base_df['innings'].sum() == 0:
+        if base_df['oaa_attempts'].notna().sum() > 0:
+            pos_inn_rates = {'LF':4.0,'CF':4.0,'RF':4.0,'C':3.5}
+            def est_inn(row):
+                att = pd.to_numeric(row.get('oaa_attempts', 0), errors='coerce') or 0
+                rate = pos_inn_rates.get(str(row.get('position','')), 3.0)
+                return round(att * rate, 1)
+            base_df['innings'] = base_df.apply(est_inn, axis=1)
+            status['innings_estimated'] = True
+        else:
+            # No attempts either — set a default so filter doesn't remove everyone
+            base_df['innings'] = MIN_INNINGS  # treat as full-season
+            status['innings_estimated'] = 'default'
 
     # Adaptive minimum: if median innings < 200, data is early-season — use 30 att as proxy
     median_inn = base_df['innings'].median() if len(base_df) > 0 else 0
