@@ -2631,7 +2631,10 @@ def render_player_card_html(row: pd.Series, player_name: str) -> str:
         if na:
             continue  # hide N/A rows entirely
         if val is None or (isinstance(val, float) and np.isnan(val)):
-            continue  # hide missing data too
+            continue  # hide missing data
+        # Hide stadium correction when it's zero (no adjustment needed for this team)
+        if col_key == 'stadium_correction' and abs(float(val)) < 0.01:
+            continue
         v = float(val)
         col = '#059669' if v > 0 else ('#dc2626' if v < 0 else '#6b7280')
         sign = '+' if v > 0 else ''
@@ -2809,7 +2812,7 @@ def page_player_cards(df: pd.DataFrame, is_demo: bool, status: dict = None):
 
     st.markdown('<div class="section-header">Player Cards</div>', unsafe_allow_html=True)
 
-    if is_demo:
+    if status.get('mode', 'demo') != 'live':
         st.markdown('<div class="warn-box">⚠ DEMO MODE — Synthetic data displayed.</div>',
                     unsafe_allow_html=True)
 
@@ -2851,124 +2854,6 @@ def page_player_cards(df: pd.DataFrame, is_demo: bool, status: dict = None):
     components.html(full_html, height=660, scrolling=True)
 
     st.markdown('<br>', unsafe_allow_html=True)
-
-    # ── Percentile bar (Plotly) ───────────────────────────────────────────────
-    if pd.notna(rcdef_plus):
-        st.markdown('<div style="font-family:IBM Plex Mono;font-size:0.7rem;color:#8892a4;margin-bottom:0.25rem;letter-spacing:0.15em;">POSITION PERCENTILE (RCDef+)</div>',
-                    unsafe_allow_html=True)
-        st.plotly_chart(build_percentile_bar(rcdef_plus), use_container_width=True, key='pct_bar')
-
-    st.markdown('<br>', unsafe_allow_html=True)
-
-    # ── Two-column detailed view ──────────────────────────────────────────────
-    col_left, col_right = st.columns([3, 2])
-
-    with col_left:
-        st.markdown('<div class="section-header" style="font-size:1.1rem;">Component Breakdown</div>',
-                    unsafe_allow_html=True)
-
-        components_list = [
-            ('Conversion Runs',       'conversion_runs',    'How well this fielder converts chances they attempt. Derived from OAA and FRV.'),
-            ('Attempt Range Score',   'attempt_range_score','Whether this fielder expands or shrinks their opportunity set vs. league avg.'),
-            ('Receiving Runs AA',     'rraa',               '(1B Only) Value added on throws — dirt balls, wide throws, stretch plays.'),
-            ('Baserunner Adv. Prev.', 'bap',                'How well this fielder suppresses extra-base advancement.'),
-            ('Arm Runs',              'arm_runs',           'Direct throwing value, separate from BAP deterrence component.'),
-            ('Framing Runs',          'framing_runs',       '(C Only) Run value of pitch framing above average.'),
-            ('Stadium Correction',   'stadium_correction', 'Gameday coordinate bias adjustment.'),
-        ]
-
-        na_reasons = {
-            'rraa':         'Not applicable — 1B only' if pos != '1B' else None,
-            'framing_runs': 'Not applicable — C only'  if pos != 'C'  else None,
-        }
-
-        for label, col_key, tooltip in components_list:
-            val      = row.get(col_key, np.nan)
-            val_str  = format_stat(val)
-            is_na    = (val_str == '-')
-            na_text  = na_reasons.get(col_key, 'Insufficient data') if is_na else None
-            pill_cls = color_stat(val)
-
-            if is_na:
-                right_html = f'<span style="font-family:IBM Plex Mono;font-size:0.72rem;color:#4a5568;">{na_text}</span>'
-            else:
-                right_html = f'<span class="stat-pill {pill_cls}" style="font-size:0.95rem;padding:0.25rem 0.7rem;">{val_str}</span>'
-
-            st.markdown(f'''
-            <div class="metric-card" style="padding:0.7rem 1.1rem;margin-bottom:0.4rem;">
-              <div style="display:flex;justify-content:space-between;align-items:center;">
-                <div style="flex:1;min-width:0;">
-                  <div class="metric-label" style="margin-bottom:0.15rem;">{label}</div>
-                  <div style="font-family:IBM Plex Mono;font-size:0.62rem;color:#4a5568;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{tooltip}</div>
-                </div>
-                <div style="flex-shrink:0;margin-left:1rem;">{right_html}</div>
-              </div>
-            </div>
-            ''', unsafe_allow_html=True)
-
-        # Sprint speed info
-        speed = row.get('sprint_speed', np.nan)
-        if pd.notna(speed):
-            st.markdown(f'''<div class="info-box" style="margin-top:0.5rem;">
-            ℹ Sprint Speed: {float(speed):.1f} ft/sec — context only, not included in RCDef
-            </div>''', unsafe_allow_html=True)
-
-    with col_right:
-        # Radar chart
-        st.markdown('<div class="section-header" style="font-size:1.1rem;">Component Radar</div>',
-                    unsafe_allow_html=True)
-        st.plotly_chart(build_radar_chart(row, selected_player), use_container_width=True, key='radar')
-
-        # Input metrics comparison
-        st.markdown('<div style="font-family:Bebas Neue;font-size:1rem;letter-spacing:0.1em;color:#8892a4;margin:0.5rem 0;">INPUT METRICS</div>',
-                    unsafe_allow_html=True)
-
-        for label, col_key, source in [
-            ('OAA',  'oaa',  'Outs Above Average · Statcast'),
-            ('FRV',  'frv',  'Fielding Run Value · Statcast'),
-            ('DRS*', 'drs',  'Def. Runs Saved · SIS/BR'),
-        ]:
-            val     = row.get(col_key, np.nan)
-            val_str = format_stat(val)
-            pill    = color_stat(val)
-            st.markdown(f'''
-            <div style="display:flex;justify-content:space-between;align-items:center;
-                        padding:0.45rem 0;border-bottom:1px solid #1e2d42;">
-              <div>
-                <span style="font-family:IBM Plex Mono;font-size:0.8rem;color:#e8eaf0;">{label}</span>
-                <span style="font-family:IBM Plex Mono;font-size:0.58rem;color:#4a5568;display:block;">{source}</span>
-              </div>
-              <span class="stat-pill {pill}">{val_str}</span>
-            </div>
-            ''', unsafe_allow_html=True)
-
-    # ── Disagreement flag detail ──────────────────────────────────────────────
-    if disagree:
-        st.markdown(f'''<div class="warn-box" style="margin-top:1rem;">
-        ⚡ Metric Disagreement: {disagree_detail.strip().rstrip("|").strip()}
-        — metrics diverge by more than {DISAGREEMENT_THRESHOLD} runs. See Methodology for explanation.
-        </div>''', unsafe_allow_html=True)
-
-    # ── Neighbor adjustment detail (infielders) ───────────────────────────────
-    if pos in ['2B', 'SS', '3B', '1B']:
-        st.markdown('<br>', unsafe_allow_html=True)
-        nb_sup = bool(row.get('neighbor_suppression', False))
-        nb_vac = bool(row.get('neighbor_vacuum', False))
-        if nb_sup:
-            st.markdown('''<div class="info-box">
-            🔵 Neighbor Suppression: Attempt Range includes a partial credit adjustment (capped at 30%).
-            A neighboring fielder appears to be cutting off balls in a zone where this player shows
-            below-average attempt rates.
-            </div>''', unsafe_allow_html=True)
-        elif nb_vac:
-            st.markdown('''<div class="warn-box">
-            ⚡ Neighbor Vacuum: Attempt Range may be partially inflated by a below-average neighboring
-            fielder. No correction applied — flag only.
-            </div>''', unsafe_allow_html=True)
-        else:
-            st.markdown('''<div style="font-family:IBM Plex Mono;font-size:0.62rem;color:#4a5568;">
-            No neighbor adjustment applied for this player.
-            </div>''', unsafe_allow_html=True)
 
     # ── Downloads ─────────────────────────────────────────────────────────────
     st.markdown('<br>', unsafe_allow_html=True)
@@ -3014,7 +2899,7 @@ def page_team_defense(df: pd.DataFrame, is_demo: bool, status: dict = None):
 
     st.markdown('<div class="section-header">Team Defense</div>', unsafe_allow_html=True)
 
-    if is_demo:
+    if status.get('mode', 'demo') != 'live':
         st.markdown('<div class="warn-box">⚠ DEMO MODE — Synthetic data displayed.</div>',
                     unsafe_allow_html=True)
 
