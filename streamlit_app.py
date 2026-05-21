@@ -2533,238 +2533,274 @@ def build_player_card_jpg(row: pd.Series, player_name: str) -> bytes | None:
         return None
 
 def render_player_card_html(row: pd.Series, player_name: str) -> str:
-    """
-    Full rich white-background player card.
-    Matches original layout (header, percentile bar, two-column breakdown + radar)
-    but with white background instead of dark.
-    """
+    """White-background player card matching approved mockup design."""
     pos         = str(row.get('position', '?'))
     team        = str(row.get('team', '?'))
     inn         = float(row.get('innings', 0) or 0)
     year        = str(row.get('data_year', ''))
-    rcdef       = row.get('rcdef', np.nan)
-    rcdef_plus  = row.get('rcdef_plus', np.nan)
+    rcdef       = row.get('rcdef', None)
+    rcdef_plus  = row.get('rcdef_plus', None)
     reliability = str(row.get('reliability', 'Low'))
     disagree    = bool(row.get('disagreement_flag', False))
-    disagree_detail = str(row.get('disagreement_detail', ''))
+    disagree_detail = str(row.get('disagreement_detail', '')).rstrip('| ').strip()
     context     = get_rcdef_context(rcdef)
     rcdef_str   = format_stat(rcdef)
-    speed       = row.get('sprint_speed', np.nan)
+    speed       = row.get('sprint_speed', None)
 
-    rcdef_col  = '#00d084' if (pd.notna(rcdef) and float(rcdef) >= 0) else '#ff4757'
-    rel_col    = {'High': '#00d084', 'Medium': '#ffd32a'}.get(reliability, '#ff4757')
-    rcp_val    = float(rcdef_plus) if pd.notna(rcdef_plus) else None
-    rcp_str    = f'{rcp_val:.1f}th percentile' if rcp_val is not None else ''
+    rcdef_col   = '#00c97a' if (rcdef is not None and not (isinstance(rcdef, float) and np.isnan(rcdef)) and float(rcdef) >= 0) else '#ef4444'
+    rel_bg      = '#00c97a' if reliability == 'High' else ('#fbbf24' if reliability == 'Medium' else '#ef4444')
+    rel_tc      = '#0a0e1a' if reliability in ('High', 'Medium') else '#ffffff'
 
-    # ── Percentile bar ───────────────────────────────────────────────────────
-    pct_fill   = rcp_val if rcp_val is not None else 0
-    pct_col    = '#00d084' if pct_fill >= 75 else ('#3b82f6' if pct_fill >= 50 else ('#f59e0b' if pct_fill >= 25 else '#ef4444'))
-    pct_bar_html = f'''
-    <div style="margin:0 22px 0;">
-      <div style="font-family:IBM Plex Mono,monospace;font-size:0.6rem;color:#6b7280;margin-bottom:4px;letter-spacing:0.1em;">POSITION PERCENTILE — RCDef+</div>
-      <div style="position:relative;height:20px;background:#e5e7eb;border-radius:4px;overflow:hidden;">
-        <div style="position:absolute;left:0;top:0;height:100%;width:{pct_fill:.1f}%;background:{pct_col};border-radius:4px;transition:width 0.5s;"></div>
-        <div style="position:absolute;left:50%;top:0;height:100%;width:1px;background:rgba(0,0,0,0.2);"></div>
-      </div>
-      <div style="display:flex;justify-content:space-between;font-family:IBM Plex Mono,monospace;font-size:0.55rem;color:#9ca3af;margin-top:3px;">
-        <span>0th</span><span style="color:{pct_col};font-weight:500;">{rcp_str}</span><span>100th</span>
-      </div>
-    </div>'''
+    pct_val     = float(rcdef_plus) if (rcdef_plus is not None and not (isinstance(rcdef_plus, float) and np.isnan(rcdef_plus))) else 0.0
+    pct_str     = f'{pct_val:.1f}th percentile' if (rcdef_plus is not None and not (isinstance(rcdef_plus, float) and np.isnan(rcdef_plus))) else '—'
+    pct_col     = '#3b82f6' if pct_val >= 50 else ('#f59e0b' if pct_val >= 25 else '#ef4444')
 
-    # ── Input metrics ────────────────────────────────────────────────────────
-    input_metrics = [
-        ('OAA',  row.get('oaa',          np.nan), 'Outs Above Average (Statcast)'),
-        ('FRV',  row.get('frv',          np.nan), 'Fielding Run Value (Statcast)'),
-        ('DRS*', row.get('drs',          np.nan), 'Def. Runs Saved (SIS/BR)'),
-        ('Spd',  row.get('sprint_speed', np.nan), 'Sprint Speed ft/sec'),
-        ('ARM',  row.get('arm_runs',     np.nan), 'Arm Runs'),
-        ('FRM',  row.get('framing_runs', np.nan), 'Framing Runs (C only)'),
-    ]
+    nb_sup = bool(row.get('neighbor_suppression', False))
+    nb_vac = bool(row.get('neighbor_vacuum', False))
+    if nb_sup:
+        nbr_html = '<div style="font-size:11px;color:#1d4ed8;background:#eff6ff;border:0.5px solid #bfdbfe;border-radius:6px;padding:7px 10px;margin-top:10px;">&#x1F535; Neighbor suppression adjustment applied (30% cap).</div>'
+    elif nb_vac:
+        nbr_html = '<div style="font-size:11px;color:#92400e;background:#fef3c7;border:0.5px solid #fcd34d;border-radius:6px;padding:7px 10px;margin-top:10px;">&#x26A1; Neighbor vacuum flagged — no correction applied.</div>'
+    else:
+        nbr_html = '<div style="font-size:11px;color:#9ca3af;margin-top:10px;">No neighbor adjustment applied.</div>'
 
-    def input_cell(label, val, tooltip):
-        if pd.isna(val):
-            return f'''<div style="flex:1;text-align:center;padding:8px 4px;border-right:1px solid #e5e7eb;">
-              <div style="font-size:0.55rem;color:#6b7280;font-family:IBM Plex Mono;letter-spacing:0.1em;margin-bottom:4px;">{label}</div>
-              <div style="font-size:1rem;font-family:Bebas Neue,sans-serif;color:#d1d5db;">—</div>
-              <div style="font-size:0.5rem;color:#d1d5db;font-family:IBM Plex Mono;">{tooltip[:20]}</div>
+    speed_html = ''
+    if speed is not None and not (isinstance(speed, float) and np.isnan(speed)):
+        speed_html = f'<div style="background:#eff6ff;border:0.5px solid #bfdbfe;border-radius:6px;padding:7px 10px;font-size:11px;color:#1d4ed8;margin-top:12px;">&#x2139; Sprint Speed: {float(speed):.1f} ft/sec — context only</div>'
+
+    disagree_html = ''
+    if disagree and disagree_detail:
+        disagree_html = f'<div style="display:inline-flex;align-items:center;gap:5px;background:rgba(234,179,8,0.15);border:0.5px solid rgba(234,179,8,0.45);border-radius:4px;padding:3px 8px;font-size:10px;color:#ca8a04;margin-top:7px;">&#x26A0; {disagree_detail}</div>'
+    elif disagree:
+        disagree_html = '<div style="display:inline-flex;align-items:center;gap:5px;background:rgba(234,179,8,0.15);border:0.5px solid rgba(234,179,8,0.45);border-radius:4px;padding:3px 8px;font-size:10px;color:#ca8a04;margin-top:7px;">&#x26A0; Metric disagreement detected</div>'
+
+    def inp_cell(label, val, src):
+        if val is None or (isinstance(val, float) and np.isnan(val)):
+            return f'''<div style="padding:10px 8px;text-align:center;border-right:0.5px solid #e5e7eb;">
+              <div style="font-size:10px;letter-spacing:0.1em;color:#6b7280;text-transform:uppercase;margin-bottom:4px;">{label}</div>
+              <div style="font-size:15px;font-weight:500;color:#9ca3af;">—</div>
+              <div style="font-size:10px;color:#9ca3af;margin-top:1px;">{src}</div>
             </div>'''
         v = float(val)
-        c = '#00d084' if v > 0 else ('#ef4444' if v < 0 else '#6b7280')
-        s = '+' if v > 0 else ''
-        return f'''<div style="flex:1;text-align:center;padding:8px 4px;border-right:1px solid #e5e7eb;">
-          <div style="font-size:0.55rem;color:#6b7280;font-family:IBM Plex Mono;letter-spacing:0.1em;margin-bottom:4px;">{label}</div>
-          <div style="font-size:1.1rem;font-family:Bebas Neue,sans-serif;color:{c};">{s}{v:.1f}</div>
-          <div style="font-size:0.5rem;color:#9ca3af;font-family:IBM Plex Mono;">{tooltip[:20]}</div>
+        col = '#059669' if v > 0 else ('#dc2626' if v < 0 else '#6b7280')
+        sign = '+' if v > 0 else ''
+        return f'''<div style="padding:10px 8px;text-align:center;border-right:0.5px solid #e5e7eb;">
+          <div style="font-size:10px;letter-spacing:0.1em;color:#6b7280;text-transform:uppercase;margin-bottom:4px;">{label}</div>
+          <div style="font-size:15px;font-weight:500;color:{col};">{sign}{v:.1f}</div>
+          <div style="font-size:10px;color:#9ca3af;margin-top:1px;">{src}</div>
         </div>'''
 
-    input_row_html = ''.join(input_cell(l, v, t) for l, v, t in input_metrics)
-
-    # ── Component breakdown (left column) ────────────────────────────────────
-    components = [
-        ('Conversion Runs',       'conversion_runs',    'How well this fielder converts chances they attempt.'),
-        ('Attempt Range Score',   'attempt_range_score','Expands or shrinks opportunity set vs. league avg. Neighbor-adjusted.'),
-        ('Receiving Runs AA',     'rraa',               '(1B Only) Value on throws from infielders.'),
-        ('Baserunner Adv. Prev.', 'bap',                'Suppresses extra-base advancement via speed/deterrence.'),
-        ('Arm Runs',              'arm_runs',           'Direct throwing value, separate from BAP.'),
-        ('Framing Runs',          'framing_runs',       '(C Only) Pitch framing run value above average.'),
-        ('Stadium Correction',    'stadium_correction', 'Gameday coordinate bias adjustment.'),
-    ]
+    input_strip = (
+        inp_cell('OAA',  row.get('oaa',          None), 'Statcast') +
+        inp_cell('FRV',  row.get('frv',          None), 'Statcast') +
+        inp_cell('DRS*', row.get('drs',          None), 'SIS / BR') +
+        inp_cell('Spd',  row.get('sprint_speed', None), 'ft / sec') +
+        inp_cell('ARM',  row.get('arm_runs',     None), 'Runs') +
+        inp_cell('FRM',  row.get('framing_runs', None), 'C only')
+    )
+    # Remove border-right from last cell
+    input_strip = input_strip[:input_strip.rfind('border-right:0.5px solid #e5e7eb')] +                   input_strip[input_strip.rfind('border-right:0.5px solid #e5e7eb') + len('border-right:0.5px solid #e5e7eb'):]
 
     na_reasons = {
         'rraa':         '1B only' if pos != '1B' else None,
         'framing_runs': 'C only'  if pos != 'C'  else None,
     }
 
-    comp_vals = []
-    for _, col, _ in components:
-        v = row.get(col, np.nan)
-        comp_vals.append(float(v) if pd.notna(v) else None)
+    components = [
+        ('Conversion Runs',       'conversion_runs',    'How well this fielder converts chances they attempt. Derived from OAA and FRV.'),
+        ('Attempt Range Score',   'attempt_range_score','Expands or shrinks opportunity set vs. league avg. Neighbor-adjusted.'),
+        ('Receiving Runs AA',     'rraa',               '(1B only) Value on throws from infielders.'),
+        ('Baserunner Adv. Prev.', 'bap',                'Suppresses extra-base advancement via positioning and deterrence.'),
+        ('Arm Runs',              'arm_runs',           'Direct throwing value, separate from BAP deterrence.'),
+        ('Framing Runs',          'framing_runs',       '(C only) Pitch framing run value above average.'),
+        ('Stadium Correction',    'stadium_correction', 'Gameday coordinate bias adjustment.'),
+    ]
 
-    max_abs = max((abs(v) for v in comp_vals if v is not None), default=5)
-    max_abs = max(max_abs, 5)
+    comp_vals = {col: row.get(col, None) for _, col, _ in components}
+    valid_vals = [abs(float(v)) for _, col, _ in components
+                  for v in [comp_vals[col]]
+                  if v is not None and not (isinstance(v, float) and np.isnan(v))
+                  and not na_reasons.get(col)]
+    max_abs = max(valid_vals) if valid_vals else 5.0
+    max_abs = max(max_abs, 3.0)
 
-    def comp_row(label, col_key, val, tooltip):
-        na_override = na_reasons.get(col_key)
-        pill_bg  = '#f3f4f6'
-        pill_txt = '#9ca3af'
-        bar_html = ''
-
-        if val is None or na_override:
-            reason = na_override or 'No data'
-            val_display = f'<span style="font-size:0.65rem;color:#9ca3af;font-family:IBM Plex Mono;">— {reason}</span>'
-            bar_html = f'<div style="flex:1;height:14px;background:#f3f4f6;border-radius:3px;display:flex;align-items:center;padding-left:8px;"><span style="font-size:0.6rem;color:#9ca3af;font-family:IBM Plex Mono;">N/A — {reason}</span></div>'
-        else:
-            bar_pct = min(abs(val) / max_abs * 88, 88)
-            bar_col = '#00d084' if val >= 0 else '#ef4444'
-            sign = '+' if val > 0 else ''
-            val_display = f'<span style="font-family:IBM Plex Mono;font-size:0.8rem;color:{bar_col};font-weight:500;">{sign}{val:.1f}</span>'
-            bar_html = f'''<div style="flex:1;height:14px;background:#f3f4f6;border-radius:3px;overflow:hidden;">
-              <div style="width:{bar_pct:.1f}%;height:100%;background:{bar_col};border-radius:3px;"></div>
-            </div>'''
-
-        return f'''
-        <div style="margin-bottom:10px;">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px;">
-            <span style="font-family:IBM Plex Mono;font-size:0.65rem;color:#374151;letter-spacing:0.05em;">{label}</span>
-            {val_display}
+    breakdown_rows = ''
+    for label, col_key, desc in components:
+        val = comp_vals[col_key]
+        na = na_reasons.get(col_key)
+        if na:
+            continue  # hide N/A rows entirely
+        if val is None or (isinstance(val, float) and np.isnan(val)):
+            continue  # hide missing data too
+        v = float(val)
+        col = '#059669' if v > 0 else ('#dc2626' if v < 0 else '#6b7280')
+        sign = '+' if v > 0 else ''
+        bar_pct = min(abs(v) / max_abs * 88, 88)
+        breakdown_rows += f'''
+        <div style="margin-bottom:15px;">
+          <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:3px;">
+            <span style="font-size:13px;font-weight:500;color:#111827;">{label}</span>
+            <span style="font-size:14px;font-weight:500;color:{col};">{sign}{v:.1f}</span>
           </div>
-          <div style="display:flex;align-items:center;gap:8px;">
-            {bar_html}
+          <div style="font-size:11px;color:#6b7280;margin-bottom:5px;line-height:1.4;">{desc}</div>
+          <div style="background:#f3f4f6;border-radius:3px;height:6px;overflow:hidden;">
+            <div style="width:{bar_pct:.1f}%;height:100%;background:{col};border-radius:3px;"></div>
           </div>
-          <div style="font-size:0.55rem;color:#9ca3af;font-family:IBM Plex Mono;margin-top:2px;">{tooltip}</div>
         </div>'''
 
-    breakdown_html = ''.join(comp_row(lbl, col, val, tip)
-                              for (lbl, col, tip), val in zip(components, comp_vals))
-
-    # ── Right column: input metric comparison + neighbor + sprint ────────────
-    def input_comparison_row(label, col_key, source, val):
-        val_str = format_stat(val)
-        if val_str == '-':
-            pill = '<span style="font-family:IBM Plex Mono;font-size:0.75rem;color:#d1d5db;">—</span>'
-        else:
-            v = float(val)
-            c = '#00d084' if v > 0 else ('#ef4444' if v < 0 else '#6b7280')
-            s = '+' if v > 0 else ''
-            pill = f'<span style="font-family:IBM Plex Mono;font-size:0.85rem;color:{c};font-weight:500;">{s}{v:.1f}</span>'
+    def inp_cmp(label, col_key, src, val):
+        if val is None or (isinstance(val, float) and np.isnan(val)):
+            return ''
+        v = float(val)
+        sign = '+' if v > 0 else ''
+        bg  = '#d1fae5' if v > 0 else ('#fee2e2' if v < 0 else '#f3f4f6')
+        tc  = '#065f46' if v > 0 else ('#991b1b' if v < 0 else '#374151')
         return f'''
-        <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid #f3f4f6;">
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:0.5px solid #f3f4f6;">
           <div>
-            <div style="font-family:IBM Plex Mono;font-size:0.75rem;color:#374151;">{label}</div>
-            <div style="font-family:IBM Plex Mono;font-size:0.55rem;color:#9ca3af;">{source}</div>
+            <div style="font-size:13px;font-weight:500;color:#111827;">{label}</div>
+            <div style="font-size:11px;color:#9ca3af;">{src}</div>
           </div>
-          {pill}
+          <span style="font-size:13px;font-weight:500;padding:3px 10px;border-radius:4px;background:{bg};color:{tc};">{sign}{v:.1f}</span>
         </div>'''
 
-    input_comparison_html = (
-        input_comparison_row('OAA',  'oaa', 'Outs Above Avg · Statcast',    row.get('oaa', np.nan)) +
-        input_comparison_row('FRV',  'frv', 'Fielding Run Value · Statcast', row.get('frv', np.nan)) +
-        input_comparison_row('DRS*', 'drs', 'Def. Runs Saved · SIS/BR',     row.get('drs', np.nan))
+    input_cmp = (
+        inp_cmp('OAA',  'oaa', 'Outs Above Average · Statcast',    row.get('oaa', None)) +
+        inp_cmp('FRV',  'frv', 'Fielding Run Value · Statcast',    row.get('frv', None)) +
+        inp_cmp('DRS*', 'drs', 'Def. Runs Saved · SIS/BR',         row.get('drs', None))
     )
 
-    # Neighbor note
-    nb_sup = bool(row.get('neighbor_suppression', False))
-    nb_vac = bool(row.get('neighbor_vacuum', False))
-    if nb_sup:
-        neighbor_html = '<div style="background:#eff6ff;border:1px solid #3b82f6;border-radius:4px;padding:6px 10px;margin-top:10px;font-family:IBM Plex Mono;font-size:0.62rem;color:#1e40af;">🔵 Neighbor suppression adjustment applied (30% cap)</div>'
-    elif nb_vac:
-        neighbor_html = '<div style="background:#fef3c7;border:1px solid #f59e0b;border-radius:4px;padding:6px 10px;margin-top:10px;font-family:IBM Plex Mono;font-size:0.62rem;color:#92400e;">⚡ Neighbor vacuum flagged — no correction applied</div>'
-    else:
-        neighbor_html = '<div style="font-family:IBM Plex Mono;font-size:0.6rem;color:#9ca3af;margin-top:10px;">No neighbor adjustment applied.</div>'
+    html = f'''<div style="background:#ffffff;border:0.5px solid #e5e7eb;border-radius:12px;overflow:hidden;font-family:system-ui,sans-serif;max-width:900px;">
 
-    speed_html = ''
-    if pd.notna(speed):
-        speed_html = f'<div style="background:#eff6ff;border:1px solid #3b82f6;border-radius:4px;padding:6px 10px;margin-top:8px;font-family:IBM Plex Mono;font-size:0.62rem;color:#1e40af;">ℹ Sprint Speed: {float(speed):.1f} ft/sec (context only)</div>'
-
-    disagree_html = ''
-    if disagree:
-        disagree_html = f'<div style="background:#fef3c7;border:1px solid #f59e0b;border-radius:4px;padding:6px 10px;margin-top:8px;font-family:IBM Plex Mono;font-size:0.62rem;color:#92400e;">⚡ Metric Disagreement: {disagree_detail.strip().rstrip("|").strip()}</div>'
-
-    html = f'''
-    <div style="background:#ffffff;border:1px solid #e5e7eb;border-radius:10px;overflow:hidden;font-family:sans-serif;">
-
-      <!-- HEADER -->
-      <div style="background:#0a0e1a;padding:16px 22px 12px;">
-        <div style="display:flex;justify-content:space-between;align-items:flex-start;">
-          <div>
-            <div style="font-family:Bebas Neue,sans-serif;font-size:1.3rem;color:#00d084;letter-spacing:0.15em;line-height:1;">RCDef</div>
-            <div style="font-family:Bebas Neue,sans-serif;font-size:1.8rem;color:#f9fafb;letter-spacing:0.04em;line-height:1.1;margin-top:2px;">{player_name.upper()}</div>
-            <div style="font-family:IBM Plex Mono,monospace;font-size:0.62rem;color:#6b7280;margin-top:4px;">{team} · {POSITIONS.get(pos, pos)} · {inn:.0f} inn · {year} Season</div>
-          </div>
-          <div style="text-align:right;">
-            <div style="font-family:IBM Plex Mono,monospace;font-size:0.58rem;color:#6b7280;letter-spacing:0.1em;">RCDef</div>
-            <div style="font-family:Bebas Neue,sans-serif;font-size:2.2rem;color:{rcdef_col};line-height:1;">{rcdef_str}</div>
-            <div style="font-family:IBM Plex Mono,monospace;font-size:0.58rem;color:#6b7280;margin-top:2px;">{context}</div>
-            <div style="margin-top:6px;">
-              <span style="background:{rel_col};color:#0a0e1a;font-family:IBM Plex Mono,monospace;font-size:0.58rem;padding:2px 8px;border-radius:3px;font-weight:600;">{reliability.upper()}</span>
-            </div>
-          </div>
-        </div>
+  <div style="background:#0a0e1a;padding:20px 24px 16px;">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;">
+      <div>
+        <div style="font-size:11px;font-weight:500;letter-spacing:0.18em;color:#00c97a;text-transform:uppercase;margin-bottom:6px;">RCDef</div>
+        <div style="font-size:26px;font-weight:500;color:#f4f5f7;letter-spacing:0.02em;line-height:1;">{player_name.upper()}</div>
+        <div style="font-size:12px;color:#6b7280;margin-top:5px;letter-spacing:0.04em;">{team} &nbsp;·&nbsp; {POSITIONS.get(pos, pos)} &nbsp;·&nbsp; {inn:.0f} inn &nbsp;·&nbsp; {year} Season</div>
         {disagree_html}
       </div>
-
-      <!-- GREEN DIVIDER -->
-      <div style="height:3px;background:#00d084;"></div>
-
-      <!-- PERCENTILE BAR -->
-      <div style="background:#f9fafb;padding:12px 0 10px;">
-        {pct_bar_html}
+      <div style="text-align:right;flex-shrink:0;margin-left:20px;">
+        <div style="font-size:10px;letter-spacing:0.15em;color:#6b7280;text-transform:uppercase;">RCDef</div>
+        <div style="font-size:32px;font-weight:500;color:{rcdef_col};line-height:1;">{rcdef_str}</div>
+        <div style="font-size:11px;color:#6b7280;margin-top:2px;">{context}</div>
+        <div style="margin-top:6px;"><span style="display:inline-block;font-size:10px;font-weight:500;letter-spacing:0.08em;padding:3px 9px;border-radius:4px;background:{rel_bg};color:{rel_tc};">{reliability.upper()} RELIABILITY</span></div>
       </div>
-
-      <div style="height:1px;background:#e5e7eb;"></div>
-
-      <!-- INPUT METRICS STRIP -->
-      <div style="display:flex;background:#ffffff;border-bottom:1px solid #e5e7eb;">
-        {input_row_html}
-      </div>
-
-      <!-- MAIN BODY: two columns -->
-      <div style="display:flex;gap:0;">
-
-        <!-- LEFT: component breakdown -->
-        <div style="flex:3;padding:16px 20px 12px;border-right:1px solid #e5e7eb;">
-          <div style="font-family:Bebas Neue,sans-serif;font-size:0.85rem;letter-spacing:0.1em;color:#374151;margin-bottom:12px;">COMPONENT BREAKDOWN</div>
-          {breakdown_html}
-        </div>
-
-        <!-- RIGHT: input comparison + notes -->
-        <div style="flex:2;padding:16px 18px 12px;">
-          <div style="font-family:Bebas Neue,sans-serif;font-size:0.85rem;letter-spacing:0.1em;color:#6b7280;margin-bottom:8px;">INPUT METRICS</div>
-          {input_comparison_html}
-          {speed_html}
-          {neighbor_html}
-        </div>
-
-      </div>
-
-      <!-- FOOTER -->
-      <div style="background:#f3f4f6;padding:6px 22px;font-family:IBM Plex Mono,monospace;font-size:0.55rem;color:#9ca3af;border-top:1px solid #e5e7eb;">
-        RCDef Composite Defensive Analytics · rcdef.streamlit.app · *DRS © Sports Info Solutions / Baseball Reference · Non-commercial
-      </div>
-
     </div>
-    '''
+  </div>
+
+  <div style="height:3px;background:#00c97a;"></div>
+
+  <div style="background:#f9fafb;padding:12px 24px 10px;border-bottom:0.5px solid #e5e7eb;">
+    <div style="font-size:10px;letter-spacing:0.12em;color:#6b7280;text-transform:uppercase;margin-bottom:6px;">Position percentile — RCDef+</div>
+    <div style="background:#e5e7eb;border-radius:4px;height:10px;position:relative;overflow:hidden;">
+      <div style="height:100%;width:{pct_val:.1f}%;background:{pct_col};border-radius:4px;"></div>
+      <div style="position:absolute;top:0;left:50%;width:1px;height:100%;background:rgba(0,0,0,0.2);"></div>
+    </div>
+    <div style="display:flex;justify-content:space-between;font-size:10px;color:#9ca3af;margin-top:3px;">
+      <span>0th</span><span style="color:{pct_col};font-weight:500;">{pct_str}</span><span>100th</span>
+    </div>
+  </div>
+
+  <div style="display:grid;grid-template-columns:repeat(6,1fr);border-bottom:0.5px solid #e5e7eb;background:#ffffff;">
+    {input_strip}
+  </div>
+
+  <div style="display:grid;grid-template-columns:3fr 2fr;background:#ffffff;">
+
+    <div style="padding:18px 20px;border-right:0.5px solid #e5e7eb;">
+      <div style="font-size:10px;letter-spacing:0.12em;text-transform:uppercase;color:#9ca3af;margin-bottom:14px;font-weight:500;">Component breakdown</div>
+      {breakdown_rows}
+    </div>
+
+    <div style="padding:18px 18px;background:#ffffff;">
+      <div style="font-size:10px;letter-spacing:0.12em;text-transform:uppercase;color:#9ca3af;margin-bottom:10px;font-weight:500;">Component radar</div>
+      <svg viewBox="0 0 200 175" style="width:100%;max-width:220px;display:block;margin:0 auto 16px;">
+        <defs><style>.rl{{fill:none;stroke:#e5e7eb;stroke-width:0.75}}.rt{{font-size:9px;fill:#9ca3af;text-anchor:middle;font-family:system-ui,sans-serif}}</style></defs>
+        <g transform="translate(100,88)">
+          <polygon points="0,-60 52,-30 52,30 0,60 -52,30 -52,-30" class="rl"/>
+          <polygon points="0,-40 34.6,-20 34.6,20 0,40 -34.6,20 -34.6,-20" class="rl"/>
+          <polygon points="0,-20 17.3,-10 17.3,10 0,20 -17.3,10 -17.3,-10" class="rl"/>
+          <line x1="0" y1="-60" x2="0" y2="60" class="rl"/>
+          <line x1="52" y1="-30" x2="-52" y2="30" class="rl"/>
+          <line x1="52" y1="30" x2="-52" y2="-30" class="rl"/>
+          <polygon points="{_radar_pts(row, max_abs)}" style="fill:rgba(5,150,105,0.15);stroke:#059669;stroke-width:1.5;stroke-linejoin:round"/>
+          {_radar_dots(row, max_abs)}
+          <text x="0" y="-67" class="rt">Conv. Runs</text>
+          <text x="62" y="-33" class="rt" style="text-anchor:start">Att. Range</text>
+          <text x="62" y="38" class="rt" style="text-anchor:start">BAP</text>
+          <text x="0" y="74" class="rt">Arm Runs</text>
+          <text x="-62" y="38" class="rt" style="text-anchor:end">Stad. Adj.</text>
+          <text x="-62" y="-33" class="rt" style="text-anchor:end">FRV</text>
+        </g>
+      </svg>
+
+      <div style="font-size:10px;letter-spacing:0.12em;text-transform:uppercase;color:#9ca3af;margin-bottom:8px;font-weight:500;">Input metrics</div>
+      {input_cmp}
+      {speed_html}
+      {nbr_html}
+    </div>
+
+  </div>
+
+  <div style="background:#f9fafb;padding:7px 24px;font-size:10px;color:#9ca3af;border-top:0.5px solid #e5e7eb;">
+    RCDef Composite Defensive Analytics &nbsp;·&nbsp; rcdefplus.streamlit.app &nbsp;·&nbsp; *DRS &copy; Sports Info Solutions / Baseball Reference &nbsp;·&nbsp; Non-commercial
+  </div>
+
+</div>'''
     return html
+
+
+def _radar_pts(row, max_abs):
+    """Calculate radar polygon points from component values."""
+    # 6 axes: Conv.Runs(top), Att.Range(top-right), BAP(bot-right), Arm(bot), Stad(bot-left), FRV(top-left)
+    axes = [
+        row.get('conversion_runs', 0),
+        row.get('attempt_range_score', 0),
+        row.get('bap', 0),
+        row.get('arm_runs', 0),
+        row.get('stadium_correction', 0),
+        row.get('frv', 0),
+    ]
+    import math
+    pts = []
+    for i, v in enumerate(axes):
+        try:
+            v = float(v) if v is not None and not (isinstance(v, float) and math.isnan(v)) else 0.0
+        except Exception:
+            v = 0.0
+        r = min(abs(v) / max(max_abs, 3) * 55, 55)
+        angle = math.radians(-90 + i * 60)
+        x = round(r * math.cos(angle), 1)
+        y = round(r * math.sin(angle), 1)
+        pts.append(f'{x},{y}')
+    return ' '.join(pts)
+
+
+def _radar_dots(row, max_abs):
+    """Generate circle elements for radar vertices."""
+    import math
+    axes = [
+        row.get('conversion_runs', 0),
+        row.get('attempt_range_score', 0),
+        row.get('bap', 0),
+        row.get('arm_runs', 0),
+        row.get('stadium_correction', 0),
+        row.get('frv', 0),
+    ]
+    dots = ''
+    for i, v in enumerate(axes):
+        try:
+            v = float(v) if v is not None and not (isinstance(v, float) and math.isnan(v)) else 0.0
+        except Exception:
+            v = 0.0
+        r = min(abs(v) / max(max_abs, 3) * 55, 55)
+        angle = math.radians(-90 + i * 60)
+        x = round(r * math.cos(angle), 1)
+        y = round(r * math.sin(angle), 1)
+        dots += f'<circle cx="{x}" cy="{y}" r="3" fill="#059669"/>'
+    return dots
+
 
 
 def page_player_cards(df: pd.DataFrame, is_demo: bool, status: dict = None):
