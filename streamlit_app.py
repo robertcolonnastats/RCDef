@@ -294,7 +294,7 @@ hr {
 # ─────────────────────────────────────────────
 CURRENT_YEARS = [2025, 2026]
 MIN_INNINGS = 300
-CACHE_VERSION = 5  # Increment this to bust all cached results
+CACHE_VERSION = 6  # Increment this to bust all cached results
 MIN_RRAA_ATTEMPTS = 50
 DISAGREEMENT_THRESHOLD = 8
 NEIGHBOR_STD_THRESHOLD = 1.0
@@ -1609,6 +1609,10 @@ def _build_master_dataset_inner(year: int):
     # Drop any stale demo flag that may have come from a previous cached run
     main_df = main_df.drop(columns=['is_demo'], errors='ignore')
 
+    # Log row counts at each pipeline stage for diagnostics
+    status['rows_after_filter'] = len(main_df)
+    status['rows_base_df'] = len(base_df)
+
     # Apply calculations
     raw_statcast = pd.DataFrame()  # Full Statcast too large for cached session; use summary metrics
 
@@ -1639,6 +1643,8 @@ def _build_master_dataset_inner(year: int):
     status['players_limited'] = len(limited_df)
     status['last_updated'] = datetime.now().strftime('%Y-%m-%d %H:%M UTC')
 
+    status['rows_final'] = len(main_df)
+    status['final_cols'] = list(main_df.columns)[:10]
     return main_df, status
 
 
@@ -3304,7 +3310,7 @@ def main():
         ''', unsafe_allow_html=True)
 
         page = st.radio(
-            '',
+            'Navigation',
             ['Leaderboard', 'Player Cards', 'Team Defense', 'Methodology'],
             key='nav_page',
             label_visibility='collapsed'
@@ -3425,6 +3431,10 @@ def main():
             diag_rows.append({'key': 'base_source',   'value': status.get('base_source', 'none')})
             diag_rows.append({'key': 'last_updated',  'value': status.get('last_updated', 'unknown')})
             diag_rows.append({'key': 'demo_reason',   'value': status.get('demo_reason', '')})
+            diag_rows.append({'key': 'rows_base_df',   'value': str(status.get('rows_base_df', '?'))})
+            diag_rows.append({'key': 'rows_after_filter', 'value': str(status.get('rows_after_filter', '?'))})
+            diag_rows.append({'key': 'rows_final',     'value': str(status.get('rows_final', '?'))})
+            diag_rows.append({'key': 'final_cols',     'value': str(status.get('final_cols', []))})
             diag_rows.append({'key': 'traceback',     'value': status.get('traceback', '')})
             diag_rows.append({'key': 'frv_estimated', 'value': str(status.get('frv_estimated', False))})
             diag_rows.append({'key': 'innings_estimated', 'value': str(status.get('innings_estimated', False))})
